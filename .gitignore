@@ -1,0 +1,14 @@
+# Auto-patcher runtime artifacts
+PRE-HUB-*/
+WORK-HUB-*/
+FRESHNESS-HUB-*/
+POST-VERIFY-HUB-*/
+ROLLBACK-VERIFY-HUB-*/
+PRE-STRIVEN-CENTRAL-HUB-*-BACKUP-*.zip
+
+# Local auth / editor files
+.clasp.json
+.clasprc.json
+node_modules/
+.DS_Store
+Thumbs.db
