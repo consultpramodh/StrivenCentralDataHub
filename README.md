@@ -122,28 +122,28 @@ This verification + GitHub synchronization step is mandatory for future releases
 9. Pull POST source and require a full SHA match with WORK.
 10. Restore PRE and verify rollback if anything becomes uncertain after mutation.
 
-## Run the patch
-
-On Windows with Node.js and an existing clasp login:
-
-```text
-RUN_AUTO_UPDATE.cmd
-```
-
-Target Apps Script ID is stored in `SCRIPT_ID.txt`.
-
 ## Current test
 
-The current test is stored only in `90_Tests` and must reflect the current release gate. Superseded test functions are removed rather than retained.
+Current live/GitHub test:
 
-R1 readiness was confirmed on September 9, 2026 with:
+```javascript
+test_StdItemsReportConnection()
+```
 
-- structure: PASS,
-- 8 registered projects,
-- registry validation: PASS,
-- Apps Script API access: PASS,
-- first checked project: `Assets`,
-- 20 source files visible.
+This test is read-only. It validates the new standard Items report, OAuth access, exact 15-field schema, and canonical field mapping. It does not write Striven data and does not populate `DATA_ITEMS`.
+
+Verified PASS on September 9, 2026:
+
+- OAuth: PASS
+- sample rows: 2
+- expected fields: 15
+- actual fields: 15
+- `ItemId` normalized to canonical `Id`
+- `ItemTaxable` normalized to canonical `Taxable`
+- `DATA_ITEMS`: present
+- writes performed: false
+
+Next production step: add `hub_refreshStdItems()` to `10_Central_Hub`, then replace this test with the next single release-gate test.
 
 ## Security
 
@@ -154,4 +154,5 @@ R1 readiness was confirmed on September 9, 2026 with:
 
 ## Release
 
-Current release marker: `STRIVEN_CENTRAL_DATA_HUB_R1_20260909`
+Current verified test release: `R1.1b STD Items Connection`
+Base Hub marker: `STRIVEN_CENTRAL_DATA_HUB_R1_20260909`
