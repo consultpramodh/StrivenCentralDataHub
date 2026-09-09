@@ -1,269 +1,102 @@
 /**
  * STRIVEN CENTRAL DATA HUB
  * 90_Tests
- * CURRENT TEST ONLY — STD ITEMS REPORT CONNECTION
- * R1.1b: accepts Striven API field names ItemId and ItemTaxable
+ * CURRENT TEST ONLY — STD ITEMS FULL REFRESH
+ * R1.2
  *
- * Replaces the completed R1 readiness test.
- * Read-only: does not write Striven data and does not populate DATA_ITEMS.
+ * This test writes DATA_ITEMS in the Central Hub only.
+ * It does not write to Striven and does not modify source projects.
  */
 
-function test_StdItemsReportConnection() {
-  const started = new Date();
-  const props = PropertiesService.getScriptProperties();
+function test_StdItemsRefreshAndVerify() {
+  const result = hub_refreshStdItems();
 
-  const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
-  const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
-  const reportUrl = String(props.getProperty('STRIVEN_STD_ITEMS_REPORT_URL') || '').trim();
-
-  const missingProperties = [];
-  if (!clientId) missingProperties.push('CLIENT_ID');
-  if (!clientSecret) missingProperties.push('CLIENT_SECRET');
-  if (!reportUrl) missingProperties.push('STRIVEN_STD_ITEMS_REPORT_URL');
-
-  if (missingProperties.length) {
-    throw new Error('Missing Script Properties: ' + missingProperties.join(', '));
+  if (!result || result.status !== 'PASS') {
+    throw new Error('hub_refreshStdItems did not return PASS.');
   }
 
-  if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
-    throw new Error('STRIVEN_STD_ITEMS_REPORT_URL must be an https://api.striven.com URL.');
+  if (!result.rows || result.rows < 1) {
+    throw new Error('STD Items refresh returned no rows.');
   }
 
-  const ss = SpreadsheetApp.getActive();
-  const dataItems = ss.getSheetByName('DATA_ITEMS');
-  if (!dataItems) {
-    throw new Error('Missing Hub sheet: DATA_ITEMS');
+  if (result.strivenWritesPerformed !== false) {
+    throw new Error('Safety assertion failed: Striven writes must be false.');
   }
 
-  const token = hubTest_stdItemsAccessToken_(clientId, clientSecret);
-  const sample = hubTest_stdItemsFetchPage_(reportUrl, token, 0, 2);
-  const rows = hubTest_stdItemsExtractRows_(sample);
-
-  if (!rows.length) {
-    throw new Error('STD Items report returned zero sample rows; schema cannot be validated.');
+  if (result.sourceProjectsModified !== false) {
+    throw new Error('Safety assertion failed: source-project modifications must be false.');
   }
 
-  if (typeof rows[0] !== 'object' || Array.isArray(rows[0])) {
-    throw new Error('STD Items report did not return object rows.');
+  const expectedHeaders = hub_stdItemsHeaders_();
+  const sh = SpreadsheetApp.getActive().getSheetByName('DATA_ITEMS');
+
+  if (!sh) {
+    throw new Error('DATA_ITEMS is missing after refresh.');
   }
 
-  const expected = [
-    'ItemNumber',
-    'ItemId',
-    'ItemName',
-    'ItemCategory',
-    'Cost',
-    'Price',
-    'MAPPricing',
-    'ItemTaxable',
-    'ItemType',
-    'PreferredVendor',
-    'Description',
-    'Manufacturer',
-    'LocationName',
-    'ItemsSKU',
-    'ItemsUPC'
-  ];
+  const actualHeaders = sh
+    .getRange(1, 1, 1, expectedHeaders.length)
+    .getDisplayValues()[0];
 
-  const actualKeys = Object.keys(rows[0]);
-  const normalizedActual = {};
-  actualKeys.forEach(k => normalizedActual[hubTest_stdItemsNormalizeField_(k)] = k);
-
-  const missing = expected.filter(
-    k => !Object.prototype.hasOwnProperty.call(
-      normalizedActual,
-      hubTest_stdItemsNormalizeField_(k)
-    )
-  );
-
-  const expectedNorm = {};
-  expected.forEach(k => expectedNorm[hubTest_stdItemsNormalizeField_(k)] = true);
-
-  const unexpected = actualKeys.filter(
-    k => !expectedNorm[hubTest_stdItemsNormalizeField_(k)]
-  );
-
-  const duplicateNormalized = actualKeys.filter((k, i, arr) => {
-    const n = hubTest_stdItemsNormalizeField_(k);
-    return arr.findIndex(x => hubTest_stdItemsNormalizeField_(x) === n) !== i;
-  });
-
-  if (missing.length || unexpected.length || duplicateNormalized.length || actualKeys.length !== 15) {
-    const detail = {
-      status: 'FAIL_SCHEMA',
-      expectedFieldCount: 15,
-      actualFieldCount: actualKeys.length,
-      expectedFields: expected,
-      actualFields: actualKeys,
-      missingFields: missing,
-      unexpectedFields: unexpected,
-      duplicateNormalizedFields: duplicateNormalized
-    };
-    Logger.log(JSON.stringify(detail, null, 2));
+  if (JSON.stringify(actualHeaders) !== JSON.stringify(expectedHeaders)) {
     throw new Error(
-      'STD Items report schema mismatch. See execution log. ' +
-      'Missing=' + missing.join('|') +
-      '; Unexpected=' + unexpected.join('|') +
-      '; ActualCount=' + actualKeys.length
+      'DATA_ITEMS header mismatch. Expected=' +
+      JSON.stringify(expectedHeaders) +
+      '; Actual=' +
+      JSON.stringify(actualHeaders)
     );
   }
 
-  const result = {
+  const actualRows = Math.max(0, sh.getLastRow() - 1);
+  if (actualRows !== result.rows) {
+    throw new Error(
+      'DATA_ITEMS row-count mismatch. Refresh=' +
+      result.rows +
+      '; Sheet=' +
+      actualRows
+    );
+  }
+
+  const schema = hub_stdItemsSchema_();
+  if (schema.length !== 15) {
+    throw new Error('STD Items canonical schema must contain exactly 15 fields.');
+  }
+
+  const aliasesMissingCanonical = schema
+    .filter(function(def) {
+      const canonicalNorm = hub_normalizeFieldName_(def.canonical);
+      return !def.aliases.some(function(alias) {
+        return hub_normalizeFieldName_(alias) === canonicalNorm;
+      });
+    })
+    .map(function(def) { return def.canonical; });
+
+  if (aliasesMissingCanonical.length) {
+    throw new Error(
+      'Alias standard failure. Canonical name missing from alias set for: ' +
+      aliasesMissingCanonical.join(', ')
+    );
+  }
+
+  const logResult = {
     status: 'PASS',
-    test: 'test_StdItemsReportConnection',
-    reportConfigured: true,
-    reportHost: 'api.striven.com',
-    oauth: 'PASS',
-    sampleRows: rows.length,
-    expectedFieldCount: 15,
-    actualFieldCount: actualKeys.length,
-    actualFields: actualKeys,
-    canonicalFieldMap: { ItemId: 'Id', ItemTaxable: 'Taxable' },
-    dataItemsSheet: 'PRESENT',
-    writesPerformed: false,
-    elapsedMs: new Date().getTime() - started.getTime(),
-    nextStep: 'Add production hub_refreshStdItems only after this test passes.'
+    test: 'test_StdItemsRefreshAndVerify',
+    dataset: 'ITEMS',
+    targetSheet: 'DATA_ITEMS',
+    rows: result.rows,
+    reportPageCalls: result.reportPageCalls,
+    tokenRequestMade: result.tokenRequestMade,
+    totalApiCallsThisRun: result.totalApiCallsThisRun,
+    canonicalFieldCount: expectedHeaders.length,
+    canonicalHeaders: expectedHeaders,
+    sourceToCanonical: result.sourceToCanonical,
+    aliasStandard: 'PASS_FOR_ALL_15_FIELDS',
+    sheetRowCountVerified: true,
+    strivenWritesPerformed: false,
+    sourceProjectsModified: false,
+    nextStep: 'After PASS, sync verified R1.2 source to GitHub; keep refresh manual until migration validation.'
   };
 
-  Logger.log(JSON.stringify(result, null, 2));
-  return result;
-}
-
-function hubTest_stdItemsAccessToken_(clientId, clientSecret) {
-  const basic = Utilities.base64Encode(clientId + ':' + clientSecret);
-
-  const response = UrlFetchApp.fetch('https://api.striven.com/accesstoken', {
-    method: 'post',
-    headers: {
-      Authorization: 'Basic ' + basic,
-      Accept: 'application/json'
-    },
-    payload: {
-      grant_type: 'client_credentials',
-      ClientId: clientId
-    },
-    muteHttpExceptions: true
-  });
-
-  const code = response.getResponseCode();
-  const text = response.getContentText();
-
-  if (code < 200 || code >= 300) {
-    throw new Error(
-      'Striven OAuth failed HTTP ' + code + ': ' +
-      hubTest_stdItemsSafeText_(text, 500)
-    );
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    throw new Error('Striven OAuth returned non-JSON content.');
-  }
-
-  if (!parsed || !parsed.access_token) {
-    throw new Error('Striven OAuth response did not contain access_token.');
-  }
-
-  return String(parsed.access_token);
-}
-
-function hubTest_stdItemsFetchPage_(reportUrl, token, pageIndex, pageSize) {
-  const url = hubTest_stdItemsPagedUrl_(reportUrl, pageIndex, pageSize);
-
-  const response = UrlFetchApp.fetch(url, {
-    method: 'get',
-    headers: {
-      Authorization: 'Bearer ' + token,
-      Accept: 'application/json'
-    },
-    muteHttpExceptions: true
-  });
-
-  const code = response.getResponseCode();
-  const text = response.getContentText();
-
-  if (code < 200 || code >= 300) {
-    throw new Error(
-      'STD Items report fetch failed HTTP ' + code + ': ' +
-      hubTest_stdItemsSafeText_(text, 500)
-    );
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    throw new Error('STD Items report returned non-JSON content.');
-  }
-}
-
-function hubTest_stdItemsPagedUrl_(reportUrl, pageIndex, pageSize) {
-  let url = String(reportUrl || '').trim();
-
-  url = url
-    .replace(/([?&])pageIndex=\d+(&?)/ig, function(_, lead, tail) {
-      return tail ? lead : '';
-    })
-    .replace(/([?&])pageSize=\d+(&?)/ig, function(_, lead, tail) {
-      return tail ? lead : '';
-    })
-    .replace(/[?&]$/, '');
-
-  const separator = url.indexOf('?') >= 0 ? '&' : '?';
-  return url +
-    separator + 'pageIndex=' + encodeURIComponent(pageIndex) +
-    '&pageSize=' + encodeURIComponent(pageSize);
-}
-
-function hubTest_stdItemsExtractRows_(payload) {
-  if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== 'object') return [];
-
-  const candidates = [
-    payload.data,
-    payload.Data,
-    payload.results,
-    payload.Results,
-    payload.items,
-    payload.Items,
-    payload.rows,
-    payload.Rows,
-    payload.records,
-    payload.Records
-  ];
-
-  for (let i = 0; i < candidates.length; i++) {
-    if (Array.isArray(candidates[i])) return candidates[i];
-  }
-
-  const keys = Object.keys(payload);
-  for (let i = 0; i < keys.length; i++) {
-    const value = payload[keys[i]];
-    if (Array.isArray(value) && value.length &&
-        typeof value[0] === 'object' && !Array.isArray(value[0])) {
-      return value;
-    }
-  }
-
-  return [];
-}
-
-function hubTest_stdItemsNormalizeField_(value) {
-  return String(value == null ? '' : value)
-    .replace(/[^A-Za-z0-9]/g, '')
-    .toLowerCase();
-}
-
-function hubTest_stdItemsSafeText_(value, maxLen) {
-  let s = String(value == null ? '' : value);
-
-  s = s.replace(
-    /(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,
-    '$1[REDACTED]'
-  );
-  s = s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED_KEY]');
-  s = s.replace(/([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig, '$1[REDACTED]');
-
-  return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+  Logger.log(JSON.stringify(logResult, null, 2));
+  return logResult;
 }
