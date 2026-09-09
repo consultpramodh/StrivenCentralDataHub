@@ -57,6 +57,27 @@ SCRIPT_ID.txt
 README.md
 ```
 
+## Mandatory execution / release gate
+
+Every future code execution or release for this Hub must follow this sequence. The work is **not complete** until every applicable gate passes:
+
+1. Pull the exact live Apps Script source before making changes.
+2. Create and retain a PRE backup before any push.
+3. Patch the smallest possible existing source set; do not create a new script file for a routine fix.
+4. Keep all diagnostics in `90_Tests` only.
+5. Before introducing a newer test, remove the superseded test from `90_Tests`; keep only the current test required for the release.
+6. Run syntax/static validation before push.
+7. Re-pull live source immediately before push and stop if it changed during preparation.
+8. Push the verified WORK source.
+9. Pull POST source and require full read-back/source verification against WORK.
+10. Run the current Apps Script test and require a clear `PASS` before continuing to the next production function or migration step.
+11. If the test fails, fix the existing production/test files and repeat the same gate; do not accumulate replacement test files/functions.
+12. After the Apps Script test passes, synchronize the verified source to the project GitHub repository.
+13. Verify the GitHub repository contains the intended source and no temporary PRE/WORK/POST, mock, credential, or obsolete test artifacts.
+14. Only after both the live Apps Script verification and GitHub synchronization are confirmed may the execution be marked complete.
+
+This verification + GitHub synchronization step is mandatory for future releases, not optional housekeeping.
+
 ## Safe auto-patch workflow
 
 `RUN_AUTO_UPDATE.cmd` uses the existing clasp login and runs the guarded updater:
@@ -98,7 +119,16 @@ It verifies:
 
 It **does not call Striven** and **does not modify registered source projects**.
 
-If it passes, run:
+R1 readiness was confirmed on September 9, 2026 with:
+
+- structure: PASS,
+- 8 registered projects,
+- registry validation: PASS,
+- Apps Script API access: PASS,
+- first checked project: `Assets`,
+- 20 source files visible.
+
+If the current test passes, run:
 
 ```javascript
 hub_inventoryAllProjects()
