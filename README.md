@@ -57,6 +57,35 @@ SCRIPT_ID.txt
 README.md
 ```
 
+## Mandatory schema alias standard
+
+Every external field consumed by the Hub must be defined through a **canonical Hub field name plus an alias set**. This applies even when the current Striven/API/report field name already matches the canonical name.
+
+Examples:
+
+```text
+Canonical: Id
+Accepted aliases: Id, ItemId
+
+Canonical: Taxable
+Accepted aliases: Taxable, ItemTaxable
+```
+
+Rules:
+
+1. Consumer projects read canonical Hub field names only.
+2. The Hub is responsible for translating provider/report aliases to canonical names.
+3. Every schema definition must include at least the canonical name itself as an accepted alias.
+4. Known historical, API-generated, spacing, punctuation, casing, and report-builder variants should be listed as aliases when they are semantically identical.
+5. Alias matching must normalize case, spaces, punctuation, underscores, and common prefix differences where safe.
+6. If more than one source field matches the same canonical field in a single payload, validation must fail as ambiguous rather than silently choose one.
+7. If a required canonical field has no accepted alias in the payload, validation must fail clearly.
+8. An unexpected field must be surfaced during schema validation rather than silently ignored unless the schema explicitly marks extras as allowed.
+9. Aliases are for naming differences only; fields with different business meanings must not be merged merely because their values currently look similar.
+10. Report changes should be avoided when an API/report-builder naming difference can be safely normalized centrally.
+
+This alias layer is a mandatory design practice for all future canonical datasets, not just Items.
+
 ## Mandatory execution / release gate
 
 Every future code execution or release for this Hub must follow this sequence. The work is **not complete** until every applicable gate passes:
@@ -105,19 +134,7 @@ Target Apps Script ID is stored in `SCRIPT_ID.txt`.
 
 ## Current test
 
-After the updater reports `VERIFIED COMPLETE`, run the one current test from Apps Script:
-
-```javascript
-test_HubReadyForInventory()
-```
-
-It verifies:
-
-- Hub sheet initialization/repair,
-- the project registry,
-- read-only Apps Script API access to the first enabled source project.
-
-It **does not call Striven** and **does not modify registered source projects**.
+The current test is stored only in `90_Tests` and must reflect the current release gate. Superseded test functions are removed rather than retained.
 
 R1 readiness was confirmed on September 9, 2026 with:
 
@@ -127,13 +144,6 @@ R1 readiness was confirmed on September 9, 2026 with:
 - Apps Script API access: PASS,
 - first checked project: `Assets`,
 - 20 source files visible.
-
-If the current test passes, run:
-
-```javascript
-hub_inventoryAllProjects()
-hub_inventoryRegisteredSheetTabs()
-```
 
 ## Security
 
