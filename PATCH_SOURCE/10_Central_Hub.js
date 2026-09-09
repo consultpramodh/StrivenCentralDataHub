@@ -265,3 +265,620 @@ function hub_target_(d){const m={CUSTOMERS:'DATA_CUSTOMERS',CONTACTS:'DATA_CONTA
 function hub_redact_(v){let s=String(v==null?'':v);s=s.replace(/(authorization\s*[:=]\s*['"]?\s*bearer\s+)[A-Za-z0-9._~+\/=-]+/ig,'$1[REDACTED]');s=s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g,'[REDACTED_KEY]');s=s.replace(/([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,'$1[REDACTED]');s=s.replace(/(\b(?:api[_-]?key|apikey|token|secret|password|authorization)\b\s*[:=]\s*['"])[^'"]+(['"])/ig,'$1[REDACTED]$2');return s;}
 function hub_limit_(v,n){const s=String(v==null?'':v);return s.length<=n?s:s.substring(0,n)+'...';}
 function hub_log_(level,area,subject,message,details){const sh=SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.SYSTEM_LOG);if(sh)sh.appendRow([new Date(),level,area,subject,message,hub_limit_(details,4000)]);}
+
+/* =========================
+ * STANDARD ITEMS DATASET
+ * R1.2 — manual refresh only
+ * ========================= */
+
+/**
+ * Canonical Items schema.
+ *
+ * Mandatory rule:
+ * every field has a canonical Hub name AND an alias set.
+ * Alias matching handles naming differences only; it never merges
+ * fields with different business meanings.
+ */
+function hub_stdItemsSchema_() {
+  return [
+    {canonical:'ItemNumber', aliases:['ItemNumber','Item Number','Item_Number','ItemNo','Item No']},
+    {canonical:'Id', aliases:['Id','ItemId','ItemID','Item Id','Item_Id']},
+    {canonical:'ItemName', aliases:['ItemName','Item Name','Item_Name']},
+    {canonical:'ItemCategory', aliases:['ItemCategory','Item Category','Item_Category','Category']},
+    {canonical:'Cost', aliases:['Cost','ItemCost','Item Cost','Item_Cost']},
+    {canonical:'Price', aliases:['Price','ItemPrice','Item Price','Item_Price']},
+    {canonical:'MAPPricing', aliases:['MAPPricing','MAP Pricing','MAP_Pricing','MAPPrice','MAP Price','MAP_Price']},
+    {canonical:'Taxable', aliases:['Taxable','ItemTaxable','Item Taxable','Item_Taxable']},
+    {canonical:'ItemType', aliases:['ItemType','Item Type','Item_Type']},
+    {canonical:'PreferredVendor', aliases:['PreferredVendor','Preferred Vendor','Preferred_Vendor','PreferredVendorName','Preferred Vendor Name']},
+    {canonical:'Description', aliases:['Description','ItemDescription','Item Description','Item_Description']},
+    {canonical:'Manufacturer', aliases:['Manufacturer','ManufacturerName','Manufacturer Name','Manufacturer_Name']},
+    {canonical:'LocationName', aliases:['LocationName','Location Name','Location_Name','InventoryLocation','Inventory Location','Inventory_Location']},
+    {canonical:'ItemsSKU', aliases:['ItemsSKU','ItemSKU','Items SKU','Item SKU','Items_SKU','Item_SKU','SKU']},
+    {canonical:'ItemsUPC', aliases:['ItemsUPC','ItemUPC','Items UPC','Item UPC','Items_UPC','Item_UPC','UPC']}
+  ];
+}
+
+function hub_stdItemsHeaders_() {
+  return hub_stdItemsSchema_().map(function(def) { return def.canonical; });
+}
+
+/**
+ * Manual production refresh for the canonical Items dataset.
+ *
+ * Safety:
+ * - reads only from Striven
+ * - writes only to this Hub's DATA_ITEMS / logs / refresh control
+ * - fetches + validates the complete report before replacing DATA_ITEMS
+ * - existing DATA_ITEMS remains intact if the remote fetch fails
+ * - does not modify any registered source project
+ */
+function hub_refreshStdItems() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('STD Items refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const runId = 'STD_ITEMS_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let pageCalls = 0;
+  let rowsFetched = 0;
+
+  try {
+    hub_initializeOrRepair();
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+    const reportUrl = String(props.getProperty('STRIVEN_STD_ITEMS_REPORT_URL') || '').trim();
+
+    const missingProps = [];
+    if (!clientId) missingProps.push('CLIENT_ID');
+    if (!clientSecret) missingProps.push('CLIENT_SECRET');
+    if (!reportUrl) missingProps.push('STRIVEN_STD_ITEMS_REPORT_URL');
+    if (missingProps.length) {
+      throw new Error('Missing Script Properties: ' + missingProps.join(', '));
+    }
+    if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
+      throw new Error('STRIVEN_STD_ITEMS_REPORT_URL must use https://api.striven.com/.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    const token = tokenInfo.accessToken;
+
+    const schema = hub_stdItemsSchema_();
+    const canonicalHeaders = hub_stdItemsHeaders_();
+    const pageSize = 500;
+    const maxPages = 500;
+
+    const canonicalRows = [];
+    let sourceMap = null;
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      const payload = hub_stdItemsFetchPage_(reportUrl, token, pageIndex, pageSize);
+      pageCalls++;
+
+      const pageRows = hub_stdItemsExtractRows_(payload);
+
+      if (!pageRows.length) {
+        break;
+      }
+
+      if (!sourceMap) {
+        sourceMap = hub_buildCanonicalSourceMap_(pageRows[0], schema, false);
+      }
+
+      for (let i = 0; i < pageRows.length; i++) {
+        const row = pageRows[i];
+        const rowMap = hub_buildCanonicalSourceMap_(row, schema, false);
+
+        // Prevent silent schema drift within later pages/rows.
+        canonicalHeaders.forEach(function(canonical) {
+          if (rowMap[canonical] !== sourceMap[canonical]) {
+            throw new Error(
+              'STD Items schema drift detected for canonical field "' + canonical +
+              '" on page ' + pageIndex + ', row ' + (i + 1) +
+              '. First source field="' + sourceMap[canonical] +
+              '", current source field="' + rowMap[canonical] + '".'
+            );
+          }
+        });
+
+        canonicalRows.push(
+          canonicalHeaders.map(function(canonical) {
+            const sourceField = sourceMap[canonical];
+            const value = row[sourceField];
+            return value == null ? '' : value;
+          })
+        );
+      }
+
+      rowsFetched += pageRows.length;
+
+      if (pageRows.length < pageSize) {
+        break;
+      }
+
+      if (pageIndex === maxPages - 1) {
+        throw new Error(
+          'STD Items refresh reached the safety limit of ' + maxPages +
+          ' pages without reaching the end of the report.'
+        );
+      }
+    }
+
+    if (!canonicalRows.length) {
+      throw new Error('STD Items report returned zero rows. DATA_ITEMS was not replaced.');
+    }
+
+    if (!sourceMap) {
+      throw new Error('STD Items source schema could not be resolved.');
+    }
+
+    // Replace DATA_ITEMS only AFTER the entire remote report is fetched and validated.
+    hub_writeCanonicalDataset_(
+      SpreadsheetApp.getActive().getSheetByName('DATA_ITEMS'),
+      canonicalHeaders,
+      canonicalRows
+    );
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_updateRefreshControl_(
+      'ITEMS',
+      true,
+      canonicalRows.length,
+      pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      durationSec,
+      'SUCCESS',
+      ''
+    );
+
+    hub_apiUsage_(
+      runId,
+      'ITEMS',
+      'STRIVEN_STD_ITEMS_REPORT_URL',
+      'GET',
+      pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      canonicalRows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshStdItems'
+    );
+
+    const sourceToCanonical = {};
+    Object.keys(sourceMap).forEach(function(canonical) {
+      sourceToCanonical[sourceMap[canonical]] = canonical;
+    });
+
+    const result = {
+      status: 'PASS',
+      dataset: 'ITEMS',
+      targetSheet: 'DATA_ITEMS',
+      rows: canonicalRows.length,
+      reportPageCalls: pageCalls,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      totalApiCallsThisRun: pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      durationSec: durationSec,
+      canonicalFields: canonicalHeaders,
+      sourceToCanonical: sourceToCanonical,
+      strivenWritesPerformed: false,
+      sourceProjectsModified: false
+    };
+
+    hub_log_(
+      'INFO',
+      'STD_ITEMS_REFRESH',
+      'ITEMS',
+      'Standard Items refresh completed.',
+      JSON.stringify(result)
+    );
+
+    return result;
+
+  } catch (err) {
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const safeError = hub_limit_(String(err && err.message || err), 1000);
+
+    try {
+      hub_updateRefreshControl_(
+        'ITEMS',
+        false,
+        rowsFetched,
+        pageCalls,
+        durationSec,
+        'FAILED',
+        safeError
+      );
+      hub_apiUsage_(
+        runId,
+        'ITEMS',
+        'STRIVEN_STD_ITEMS_REPORT_URL',
+        'GET',
+        pageCalls,
+        rowsFetched,
+        durationSec,
+        'FAILED',
+        safeError,
+        'hub_refreshStdItems'
+      );
+      hub_log_(
+        'ERROR',
+        'STD_ITEMS_REFRESH',
+        'ITEMS',
+        'Standard Items refresh failed; previous DATA_ITEMS retained.',
+        safeError
+      );
+    } catch (loggingErr) {
+      // Do not mask the original failure with a secondary logging failure.
+    }
+
+    throw err;
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Reuse the Striven access token from Script Properties until near expiry.
+ * No credential/token value is written to logs.
+ */
+function hub_strivenAccessToken_(clientId, clientSecret) {
+  const props = PropertiesService.getScriptProperties();
+  const tokenKey = 'HUB_STRIVEN_ACCESS_TOKEN';
+  const expiryKey = 'HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS';
+
+  const cachedToken = String(props.getProperty(tokenKey) || '');
+  const expiryMs = Number(props.getProperty(expiryKey) || 0);
+  const now = Date.now();
+
+  // Keep a 5-minute safety margin.
+  if (cachedToken && expiryMs > now + 5 * 60 * 1000) {
+    return {
+      accessToken: cachedToken,
+      requestedNewToken: false
+    };
+  }
+
+  const basic = Utilities.base64Encode(clientId + ':' + clientSecret);
+  const response = UrlFetchApp.fetch('https://api.striven.com/accesstoken', {
+    method: 'post',
+    headers: {
+      Authorization: 'Basic ' + basic,
+      Accept: 'application/json'
+    },
+    payload: {
+      grant_type: 'client_credentials',
+      ClientId: clientId
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Striven OAuth failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error('Striven OAuth returned non-JSON content.');
+  }
+
+  if (!parsed || !parsed.access_token) {
+    throw new Error('Striven OAuth response did not contain access_token.');
+  }
+
+  const expiresIn = Number(parsed.expires_in);
+  if (!isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error('Striven OAuth response did not contain a valid expires_in value.');
+  }
+
+  props.setProperties({
+    [tokenKey]: String(parsed.access_token),
+    [expiryKey]: String(now + expiresIn * 1000)
+  }, false);
+
+  return {
+    accessToken: String(parsed.access_token),
+    requestedNewToken: true
+  };
+}
+
+function hub_stdItemsFetchPage_(reportUrl, token, pageIndex, pageSize) {
+  const url = hub_reportPagedUrl_(reportUrl, pageIndex, pageSize);
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    // A stale stored token should be cleared so the next execution obtains a new one.
+    PropertiesService.getScriptProperties().deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    PropertiesService.getScriptProperties().deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'STD Items report fetch failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error('STD Items report returned non-JSON content.');
+  }
+}
+
+function hub_reportPagedUrl_(reportUrl, pageIndex, pageSize) {
+  let url = String(reportUrl || '').trim();
+
+  url = url
+    .replace(/([?&])pageIndex=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/([?&])pageSize=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/[?&]$/, '');
+
+  const separator = url.indexOf('?') >= 0 ? '&' : '?';
+  return url +
+    separator + 'pageIndex=' + encodeURIComponent(pageIndex) +
+    '&pageSize=' + encodeURIComponent(pageSize);
+}
+
+function hub_stdItemsExtractRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data,
+    payload.Data,
+    payload.results,
+    payload.Results,
+    payload.items,
+    payload.Items,
+    payload.rows,
+    payload.Rows,
+    payload.records,
+    payload.Records
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  const keys = Object.keys(payload);
+  for (let i = 0; i < keys.length; i++) {
+    const value = payload[keys[i]];
+    if (
+      Array.isArray(value) &&
+      value.length &&
+      typeof value[0] === 'object' &&
+      !Array.isArray(value[0])
+    ) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Returns canonical -> actual source-field map.
+ * Throws on missing or ambiguous canonical mappings.
+ */
+function hub_buildCanonicalSourceMap_(row, schema, allowExtras) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error('Cannot resolve aliases from a non-object report row.');
+  }
+
+  const actualKeys = Object.keys(row);
+  const normToRaw = {};
+
+  actualKeys.forEach(function(raw) {
+    const normalized = hub_normalizeFieldName_(raw);
+    if (!normToRaw[normalized]) normToRaw[normalized] = [];
+    normToRaw[normalized].push(raw);
+  });
+
+  const map = {};
+  const acceptedNorms = {};
+  const missing = [];
+  const ambiguous = [];
+
+  schema.forEach(function(def) {
+    const matches = [];
+
+    def.aliases.forEach(function(alias) {
+      const normalized = hub_normalizeFieldName_(alias);
+      acceptedNorms[normalized] = true;
+      (normToRaw[normalized] || []).forEach(function(raw) {
+        if (matches.indexOf(raw) < 0) matches.push(raw);
+      });
+    });
+
+    if (matches.length === 0) {
+      missing.push(def.canonical);
+    } else if (matches.length > 1) {
+      ambiguous.push(def.canonical + ' <= ' + matches.join('|'));
+    } else {
+      map[def.canonical] = matches[0];
+    }
+  });
+
+  const unexpected = actualKeys.filter(function(raw) {
+    return !acceptedNorms[hub_normalizeFieldName_(raw)];
+  });
+
+  if (
+    missing.length ||
+    ambiguous.length ||
+    (!allowExtras && unexpected.length) ||
+    Object.keys(map).length !== schema.length
+  ) {
+    throw new Error(
+      'Canonical schema validation failed. ' +
+      'Missing=' + missing.join('|') +
+      '; Ambiguous=' + ambiguous.join('|') +
+      '; Unexpected=' + unexpected.join('|')
+    );
+  }
+
+  return map;
+}
+
+function hub_normalizeFieldName_(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toLowerCase();
+}
+
+function hub_writeCanonicalDataset_(sheet, headers, rows) {
+  if (!sheet) {
+    throw new Error('Target canonical dataset sheet is missing.');
+  }
+  if (!headers || !headers.length) {
+    throw new Error('Canonical dataset headers are empty.');
+  }
+
+  const neededRows = rows.length + 1;
+  if (sheet.getMaxRows() < neededRows) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), neededRows - sheet.getMaxRows());
+  }
+  if (sheet.getMaxColumns() < headers.length) {
+    sheet.insertColumnsAfter(
+      sheet.getMaxColumns(),
+      headers.length - sheet.getMaxColumns()
+    );
+  }
+
+  const clearRows = Math.max(sheet.getLastRow(), neededRows);
+  sheet.getRange(1, 1, clearRows, headers.length).clearContent();
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold')
+    .setFontColor('#FFFFFF')
+    .setBackground('#1F4E78')
+    .setWrap(true);
+
+  const chunkSize = 5000;
+  for (let offset = 0; offset < rows.length; offset += chunkSize) {
+    const chunk = rows.slice(offset, offset + chunkSize);
+    sheet.getRange(offset + 2, 1, chunk.length, headers.length).setValues(chunk);
+  }
+}
+
+function hub_updateRefreshControl_(
+  datasetKey,
+  success,
+  rows,
+  apiCalls,
+  durationSec,
+  status,
+  error
+) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.REFRESH);
+  if (!sh || sh.getLastRow() < 2) return;
+
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = {};
+  headers.forEach(function(h, i) { idx[String(h)] = i; });
+
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  const rowIndex = data.findIndex(function(r) {
+    return String(r[idx['Dataset Key']] || '').toUpperCase() === String(datasetKey).toUpperCase();
+  });
+  if (rowIndex < 0) return;
+
+  const targetRow = rowIndex + 2;
+  const now = new Date();
+
+  const updates = {
+    'Last Attempt': now,
+    'Rows': rows,
+    'API Calls': apiCalls,
+    'Duration Sec': durationSec,
+    'Status': status,
+    'Error': error || ''
+  };
+  if (success) updates['Last Success'] = now;
+
+  Object.keys(updates).forEach(function(header) {
+    if (idx[header] != null) {
+      sh.getRange(targetRow, idx[header] + 1).setValue(updates[header]);
+    }
+  });
+}
+
+function hub_apiUsage_(
+  runId,
+  datasetKey,
+  reportLabel,
+  method,
+  calls,
+  rows,
+  durationSec,
+  result,
+  error,
+  caller
+) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.API_USAGE);
+  if (!sh) return;
+
+  sh.appendRow([
+    new Date(),
+    runId,
+    datasetKey,
+    reportLabel,
+    method,
+    calls,
+    rows,
+    durationSec,
+    result,
+    error || '',
+    caller
+  ]);
+}
+
+function hub_safeExternalText_(value, maxLen) {
+  let s = String(value == null ? '' : value);
+
+  s = s.replace(
+    /(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,
+    '$1[REDACTED]'
+  );
+  s = s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED_KEY]');
+  s = s.replace(
+    /([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,
+    '$1[REDACTED]'
+  );
+
+  return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+}
