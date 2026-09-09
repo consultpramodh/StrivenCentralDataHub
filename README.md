@@ -127,23 +127,28 @@ This verification + GitHub synchronization step is mandatory for future releases
 Current live/GitHub test:
 
 ```javascript
-test_StdItemsReportConnection()
+test_StdItemsRefreshAndVerify()
 ```
 
-This test is read-only. It validates the new standard Items report, OAuth access, exact 15-field schema, and canonical field mapping. It does not write Striven data and does not populate `DATA_ITEMS`.
+This test executes the full manual standard Items refresh into `DATA_ITEMS`, validates the canonical 15-field schema and alias layer, verifies the sheet row count, and asserts that no Striven writes or source-project modifications occur.
 
 Verified PASS on September 9, 2026:
 
-- OAuth: PASS
-- sample rows: 2
-- expected fields: 15
-- actual fields: 15
+- dataset: `ITEMS`
+- target: `DATA_ITEMS`
+- rows: 19,031
+- report page calls: 39
+- token request made: true
+- total API calls in the verified run: 40
+- canonical fields: 15
+- alias standard: PASS for all 15 fields
 - `ItemId` normalized to canonical `Id`
 - `ItemTaxable` normalized to canonical `Taxable`
-- `DATA_ITEMS`: present
-- writes performed: false
+- DATA_ITEMS row count verified: true
+- Striven writes performed: false
+- source projects modified: false
 
-Next production step: add `hub_refreshStdItems()` to `10_Central_Hub`, then replace this test with the next single release-gate test.
+`hub_refreshStdItems()` remains **manual only** until migration and refresh-frequency validation are complete.
 
 ## Security
 
@@ -154,5 +159,5 @@ Next production step: add `hub_refreshStdItems()` to `10_Central_Hub`, then repl
 
 ## Release
 
-Current verified test release: `R1.1b STD Items Connection`
+Current verified release: `R1.2 STD Items Refresh`
 Base Hub marker: `STRIVEN_CENTRAL_DATA_HUB_R1_20260909`
