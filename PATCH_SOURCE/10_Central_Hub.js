@@ -882,3 +882,666 @@ function hub_safeExternalText_(value, maxLen) {
 
   return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
 }
+
+/* === HUB_STD_CONTACTS_R1_4_BEGIN ===
+ * STD - Customer Contacts - Central Hub
+ * Production full refresh.
+ *
+ * SAFETY:
+ * - READS Striven custom report only.
+ * - WRITES only this Hub's DATA_CONTACTS sheet.
+ * - Does not modify registered source projects.
+ * - Does not POST/PATCH/PUT/DELETE to Striven.
+ *
+ * BUSINESS RULES:
+ * - Report is filtered in Striven to Active customers only.
+ * - Customer ID = Customer Number in this tenant.
+ * - CustomerPrimaryEmail is derived from ContactPrimaryEmail where needed.
+ * - ContactDateCreated and ContactStatus are intentionally not required.
+ */
+
+function hub_refreshStdContacts() {
+  const startedMs = Date.now();
+  const lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(10000)) {
+    throw new Error('STD Contacts refresh is already running.');
+  }
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+    const reportUrl = String(props.getProperty('STRIVEN_STD_CONTACTS_REPORT_URL') || '').trim();
+
+    const missingProperties = [];
+    if (!clientId) missingProperties.push('CLIENT_ID');
+    if (!clientSecret) missingProperties.push('CLIENT_SECRET');
+    if (!reportUrl) missingProperties.push('STRIVEN_STD_CONTACTS_REPORT_URL');
+
+    if (missingProperties.length) {
+      throw new Error('Missing Script Properties: ' + missingProperties.join(', '));
+    }
+
+    if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
+      throw new Error('STRIVEN_STD_CONTACTS_REPORT_URL must use https://api.striven.com/.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    const fetched = hub_fetchStdContactsAllPages_(reportUrl, tokenInfo.accessToken, 500);
+
+    if (!fetched.rows.length) {
+      throw new Error('STD Contacts report returned zero rows. DATA_CONTACTS was not replaced.');
+    }
+
+    const schema = hub_stdContactsSchema_();
+    const audit = hub_auditStdContactsSchema_(fetched.actualFields, schema);
+
+    if (
+      audit.missingCanonicalFields.length ||
+      audit.ambiguousCanonicalFields.length ||
+      audit.unexpectedSourceFields.length ||
+      fetched.actualFields.length !== schema.length
+    ) {
+      throw new Error(
+        'STD Contacts schema validation failed. ' +
+        JSON.stringify({
+          expectedCanonicalFieldCount: schema.length,
+          actualFieldCount: fetched.actualFields.length,
+          actualFields: fetched.actualFields,
+          missingCanonicalFields: audit.missingCanonicalFields,
+          ambiguousCanonicalFields: audit.ambiguousCanonicalFields,
+          unexpectedSourceFields: audit.unexpectedSourceFields
+        })
+      );
+    }
+
+    const seenKeys = {};
+    let duplicateCustomerContactKeys = 0;
+    let missingCustomerIds = 0;
+    let missingContactIds = 0;
+
+    const records = fetched.rows.map(function(source) {
+      const record = hub_buildStdContactRecord_(source, audit.canonicalToSource);
+
+      if (!record.CustomerId) missingCustomerIds++;
+      if (!record.ContactId) missingContactIds++;
+
+      if (record.CustomerContactKey) {
+        if (seenKeys[record.CustomerContactKey]) duplicateCustomerContactKeys++;
+        else seenKeys[record.CustomerContactKey] = true;
+      }
+
+      return record;
+    });
+
+    if (missingCustomerIds || missingContactIds) {
+      throw new Error(
+        'STD Contacts contains required-ID gaps. ' +
+        JSON.stringify({
+          missingCustomerIds: missingCustomerIds,
+          missingContactIds: missingContactIds
+        })
+      );
+    }
+
+    if (duplicateCustomerContactKeys) {
+      throw new Error(
+        'STD Contacts contains duplicate Customer+Contact relationships. Count=' +
+        duplicateCustomerContactKeys
+      );
+    }
+
+    const headers = hub_stdContactsHeaders_();
+    const values = records.map(function(record) {
+      return headers.map(function(header) {
+        return record[header] == null ? '' : record[header];
+      });
+    });
+
+    const sh = SpreadsheetApp.getActive().getSheetByName('DATA_CONTACTS');
+    if (!sh) throw new Error('DATA_CONTACTS sheet is missing.');
+
+    hub_replaceStdContactsSheet_(sh, headers, values);
+
+    const result = {
+      status: 'PASS',
+      dataset: 'CONTACTS',
+      targetSheet: 'DATA_CONTACTS',
+      rows: records.length,
+      sourceCanonicalFieldCount: schema.length,
+      outputColumnCount: headers.length,
+      reportPageCalls: fetched.pageCalls,
+      pageSize: fetched.pageSize,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      totalApiCallsThisRun: fetched.pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      sourceToCanonical: audit.sourceToCanonical,
+      canonicalToSource: audit.canonicalToSource,
+      duplicateCustomerContactKeys: duplicateCustomerContactKeys,
+      missingCustomerIds: missingCustomerIds,
+      missingContactIds: missingContactIds,
+      derivedFields: [
+        'CustomerNumber',
+        'CustomerStatus',
+        'CustomerPrimaryEmail',
+        'NormalizedCustomerPhone',
+        'NormalizedCustomerEmail',
+        'CustomerCity',
+        'NormalizedCustomerAddress',
+        'NormalizedContactEmail',
+        'NormalizedContactPhone',
+        'ContactPhoneExtension',
+        'ContactCity',
+        'NormalizedContactAddress',
+        'EntityType',
+        'EntityId',
+        'CustomerContactKey'
+      ],
+      filterExpectation: 'Customer Status = Active in the Striven report definition.',
+      strivenWritesPerformed: false,
+      sourceProjectsModified: false,
+      elapsedMs: Date.now() - startedMs
+    };
+
+    Logger.log(JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_stdContactsSchema_() {
+  return [
+    {
+      canonical: 'CustomerDateCreated',
+      aliases: [
+        'CustomerDateCreated', 'Customer Date Created',
+        'CustomerCreatedOn', 'Customer Created On',
+        'CustomerCreatedAt', 'Customer Created At'
+      ]
+    },
+    {
+      canonical: 'CustomerId',
+      aliases: [
+        'CustomerId', 'CustomerID', 'Customer Id', 'Customer ID',
+        'CustomerCustomerId', 'CustomerCustomerID',
+        'CustomerNumber', 'Customer Number'
+      ]
+    },
+    {
+      canonical: 'CustomerName',
+      aliases: [
+        'CustomerName', 'Customer Name',
+        'CustomerFullName', 'Customer Full Name',
+        'CustomerCustomerName'
+      ]
+    },
+    {
+      canonical: 'CustomerPrimaryPhone',
+      aliases: [
+        'CustomerPrimaryPhone', 'Customer Primary Phone',
+        'CustomerPhone', 'Customer Phone'
+      ]
+    },
+    {
+      canonical: 'CustomerFullAddress',
+      aliases: [
+        'CustomerFullAddress', 'Customer Full Address',
+        'CustomerAddressFullAddress', 'Customer Address Full Address',
+        'CustomerAddress'
+      ]
+    },
+    {
+      canonical: 'ContactId',
+      aliases: [
+        'ContactId', 'ContactID', 'Contact Id', 'Contact ID'
+      ]
+    },
+    {
+      canonical: 'FirstName',
+      aliases: [
+        'FirstName', 'First Name',
+        'ContactFirstName', 'Contact First Name'
+      ]
+    },
+    {
+      canonical: 'LastName',
+      aliases: [
+        'LastName', 'Last Name',
+        'ContactLastName', 'Contact Last Name'
+      ]
+    },
+    {
+      canonical: 'ContactFullName',
+      aliases: [
+        'ContactFullName', 'Contact Full Name',
+        'FullName', 'Full Name',
+        'ContactName', 'Contact Name'
+      ]
+    },
+    {
+      canonical: 'ContactPrimaryEmail',
+      aliases: [
+        'ContactPrimaryEmail', 'Contact Primary Email',
+        'PrimaryEmail', 'Primary Email',
+        'ContactEmail', 'Contact Email'
+      ]
+    },
+    {
+      canonical: 'ContactPrimaryPhone',
+      aliases: [
+        'ContactPrimaryPhone', 'Contact Primary Phone',
+        'PrimaryPhone', 'Primary Phone',
+        'ContactPhone', 'Contact Phone'
+      ]
+    },
+    {
+      canonical: 'ContactFullAddress',
+      aliases: [
+        'ContactFullAddress', 'Contact Full Address',
+        'ContactAddressFullAddress', 'Contact Address Full Address',
+        'AddressFullAddress', 'Address Full Address'
+      ]
+    }
+  ];
+}
+
+function hub_stdContactsHeaders_() {
+  return [
+    'CustomerDateCreated',
+    'CustomerId',
+    'CustomerNumber',
+    'CustomerName',
+    'CustomerStatus',
+    'CustomerPrimaryPhone',
+    'NormalizedCustomerPhone',
+    'CustomerPrimaryEmail',
+    'NormalizedCustomerEmail',
+    'CustomerFullAddress',
+    'CustomerCity',
+    'NormalizedCustomerAddress',
+    'ContactId',
+    'FirstName',
+    'LastName',
+    'ContactFullName',
+    'ContactPrimaryEmail',
+    'NormalizedContactEmail',
+    'ContactPrimaryPhone',
+    'NormalizedContactPhone',
+    'ContactPhoneExtension',
+    'ContactFullAddress',
+    'ContactCity',
+    'NormalizedContactAddress',
+    'EntityType',
+    'EntityId',
+    'CustomerContactKey'
+  ];
+}
+
+function hub_fetchStdContactsAllPages_(reportUrl, accessToken, pageSize) {
+  const rows = [];
+  const fieldSet = {};
+  const maxPages = 500;
+  let pageCalls = 0;
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    const pageUrl = hub_stdContactsPagedUrl_(reportUrl, pageIndex, pageSize);
+
+    const response = UrlFetchApp.fetch(pageUrl, {
+      method: 'get',
+      headers: {
+        Authorization: 'Bearer ' + accessToken,
+        Accept: 'application/json'
+      },
+      muteHttpExceptions: true
+    });
+
+    pageCalls++;
+
+    const code = response.getResponseCode();
+    const text = response.getContentText();
+
+    if (code < 200 || code >= 300) {
+      throw new Error(
+        'STD Contacts report page ' + pageIndex + ' failed HTTP ' + code + ': ' +
+        hub_stdContactsSafeText_(text, 500)
+      );
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (e) {
+      throw new Error('STD Contacts page ' + pageIndex + ' returned non-JSON content.');
+    }
+
+    const pageRows = hub_stdContactsExtractRows_(payload);
+
+    pageRows.forEach(function(row) {
+      Object.keys(row || {}).forEach(function(key) {
+        fieldSet[key] = true;
+      });
+      rows.push(row);
+    });
+
+    if (pageRows.length < pageSize) {
+      return {
+        rows: rows,
+        actualFields: Object.keys(fieldSet),
+        pageCalls: pageCalls,
+        pageSize: pageSize,
+        stopReason: 'SHORT_PAGE'
+      };
+    }
+  }
+
+  throw new Error(
+    'STD Contacts reached maxPages=' + maxPages +
+    ' without a short final page. Refusing to replace DATA_CONTACTS.'
+  );
+}
+
+function hub_stdContactsPagedUrl_(reportUrl, pageIndex, pageSize) {
+  let url = String(reportUrl || '').trim();
+
+  url = url
+    .replace(/([?&])pageIndex=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/([?&])pageSize=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/[?&]$/, '');
+
+  const separator = url.indexOf('?') >= 0 ? '&' : '?';
+
+  return url +
+    separator + 'pageIndex=' + encodeURIComponent(pageIndex) +
+    '&pageSize=' + encodeURIComponent(pageSize);
+}
+
+function hub_stdContactsExtractRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.rows, payload.Rows,
+    payload.records, payload.Records
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  const keys = Object.keys(payload);
+
+  for (let i = 0; i < keys.length; i++) {
+    const value = payload[keys[i]];
+
+    if (
+      Array.isArray(value) &&
+      value.length &&
+      typeof value[0] === 'object' &&
+      !Array.isArray(value[0])
+    ) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+function hub_auditStdContactsSchema_(actualFields, schema) {
+  const normToRaw = {};
+
+  actualFields.forEach(function(raw) {
+    const norm = hub_stdContactsNormalizeFieldName_(raw);
+    if (!normToRaw[norm]) normToRaw[norm] = [];
+    normToRaw[norm].push(raw);
+  });
+
+  const canonicalToSource = {};
+  const sourceToCanonical = {};
+  const missing = [];
+  const ambiguous = [];
+  const acceptedNorms = {};
+
+  schema.forEach(function(def) {
+    const canonicalNorm = hub_stdContactsNormalizeFieldName_(def.canonical);
+    const aliases = (def.aliases || []).slice();
+
+    // Mandatory alias standard: canonical name must itself be an accepted alias.
+    if (!aliases.some(function(alias) {
+      return hub_stdContactsNormalizeFieldName_(alias) === canonicalNorm;
+    })) {
+      throw new Error(
+        'STD Contacts alias contract invalid: canonical missing from alias set for ' +
+        def.canonical
+      );
+    }
+
+    const matches = [];
+
+    aliases.forEach(function(alias) {
+      const norm = hub_stdContactsNormalizeFieldName_(alias);
+      acceptedNorms[norm] = true;
+
+      (normToRaw[norm] || []).forEach(function(raw) {
+        if (matches.indexOf(raw) < 0) matches.push(raw);
+      });
+    });
+
+    if (matches.length === 0) {
+      missing.push(def.canonical);
+      return;
+    }
+
+    if (matches.length > 1) {
+      ambiguous.push({
+        canonical: def.canonical,
+        sourceFields: matches
+      });
+      return;
+    }
+
+    canonicalToSource[def.canonical] = matches[0];
+    sourceToCanonical[matches[0]] = def.canonical;
+  });
+
+  const unexpected = actualFields.filter(function(raw) {
+    return !acceptedNorms[hub_stdContactsNormalizeFieldName_(raw)];
+  });
+
+  return {
+    canonicalToSource: canonicalToSource,
+    sourceToCanonical: sourceToCanonical,
+    missingCanonicalFields: missing,
+    ambiguousCanonicalFields: ambiguous,
+    unexpectedSourceFields: unexpected
+  };
+}
+
+function hub_buildStdContactRecord_(source, canonicalToSource) {
+  function src(canonical) {
+    const key = canonicalToSource[canonical];
+    return key ? source[key] : '';
+  }
+
+  const customerId = hub_stdContactsClean_(src('CustomerId'));
+  const contactId = hub_stdContactsClean_(src('ContactId'));
+  const customerPhone = hub_stdContactsClean_(src('CustomerPrimaryPhone'));
+  const contactPhone = hub_stdContactsClean_(src('ContactPrimaryPhone'));
+  const contactEmail = hub_stdContactsClean_(src('ContactPrimaryEmail'));
+  const customerAddress = hub_stdContactsClean_(src('CustomerFullAddress'));
+  const contactAddress = hub_stdContactsClean_(src('ContactFullAddress'));
+  const contactPhoneParts = hub_stdContactsPhoneParts_(contactPhone);
+
+  return {
+    CustomerDateCreated: src('CustomerDateCreated'),
+    CustomerId: customerId,
+    CustomerNumber: customerId,
+    CustomerName: hub_stdContactsClean_(src('CustomerName')),
+    CustomerStatus: 'Active',
+    CustomerPrimaryPhone: customerPhone,
+    NormalizedCustomerPhone: hub_stdContactsPhoneParts_(customerPhone).number,
+    CustomerPrimaryEmail: contactEmail,
+    NormalizedCustomerEmail: hub_stdContactsNormalizeEmail_(contactEmail),
+    CustomerFullAddress: customerAddress,
+    CustomerCity: hub_stdContactsCityFromFullAddress_(customerAddress),
+    NormalizedCustomerAddress: hub_stdContactsNormalizeAddress_(customerAddress),
+
+    ContactId: contactId,
+    FirstName: hub_stdContactsClean_(src('FirstName')),
+    LastName: hub_stdContactsClean_(src('LastName')),
+    ContactFullName: hub_stdContactsClean_(src('ContactFullName')),
+    ContactPrimaryEmail: contactEmail,
+    NormalizedContactEmail: hub_stdContactsNormalizeEmail_(contactEmail),
+    ContactPrimaryPhone: contactPhone,
+    NormalizedContactPhone: contactPhoneParts.number,
+    ContactPhoneExtension: contactPhoneParts.extension,
+    ContactFullAddress: contactAddress,
+    ContactCity: hub_stdContactsCityFromFullAddress_(contactAddress),
+    NormalizedContactAddress: hub_stdContactsNormalizeAddress_(contactAddress),
+
+    EntityType: 'CONTACT',
+    EntityId: contactId,
+    CustomerContactKey: customerId && contactId ? customerId + '|' + contactId : ''
+  };
+}
+
+function hub_replaceStdContactsSheet_(sh, headers, values) {
+  const requiredRows = Math.max(2, values.length + 1);
+  const requiredCols = headers.length;
+
+  if (sh.getMaxRows() < requiredRows) {
+    sh.insertRowsAfter(sh.getMaxRows(), requiredRows - sh.getMaxRows());
+  }
+
+  if (sh.getMaxColumns() < requiredCols) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), requiredCols - sh.getMaxColumns());
+  }
+
+  const oldLastRow = sh.getLastRow();
+  const oldLastColumn = sh.getLastColumn();
+
+  sh.getRange(1, 1, 1, requiredCols).setValues([headers]);
+
+  const chunkSize = 4000;
+  for (let start = 0; start < values.length; start += chunkSize) {
+    const chunk = values.slice(start, start + chunkSize);
+    sh.getRange(start + 2, 1, chunk.length, requiredCols).setValues(chunk);
+  }
+
+  const newLastRow = values.length + 1;
+
+  if (oldLastRow > newLastRow) {
+    sh.getRange(
+      newLastRow + 1,
+      1,
+      oldLastRow - newLastRow,
+      Math.max(requiredCols, oldLastColumn)
+    ).clearContent();
+  }
+
+  if (oldLastColumn > requiredCols && newLastRow > 0) {
+    sh.getRange(
+      1,
+      requiredCols + 1,
+      newLastRow,
+      oldLastColumn - requiredCols
+    ).clearContent();
+  }
+
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, requiredCols)
+    .setFontWeight('bold')
+    .setFontColor('#FFFFFF')
+    .setBackground('#1F4E78')
+    .setWrap(true);
+
+  SpreadsheetApp.flush();
+}
+
+function hub_stdContactsNormalizeFieldName_(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toLowerCase();
+}
+
+function hub_stdContactsClean_(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function hub_stdContactsNormalizeEmail_(value) {
+  return hub_stdContactsClean_(value).toLowerCase();
+}
+
+function hub_stdContactsPhoneParts_(value) {
+  const raw = hub_stdContactsClean_(value);
+  const extMatch = raw.match(/(?:ext(?:ension)?\.?|x)\s*[:.#-]?\s*(\d+)\s*$/i);
+  const extension = extMatch ? extMatch[1] : '';
+  let main = extMatch ? raw.substring(0, extMatch.index) : raw;
+  let digits = main.replace(/\D/g, '');
+
+  if (digits.length === 11 && digits.charAt(0) === '1') {
+    digits = digits.substring(1);
+  }
+
+  return {
+    number: digits.length === 10 ? digits : digits,
+    extension: extension
+  };
+}
+
+function hub_stdContactsNormalizeAddress_(value) {
+  return hub_stdContactsClean_(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hub_stdContactsCityFromFullAddress_(value) {
+  const raw = hub_stdContactsClean_(value);
+  if (!raw) return '';
+
+  const parts = raw.split(',').map(function(part) {
+    return part.trim();
+  }).filter(Boolean);
+
+  if (parts.length < 3) return '';
+
+  const last = parts[parts.length - 1];
+
+  // Only infer a city when the final component resembles a CA/US
+  // province/state/postal component. Otherwise leave blank rather than guess.
+  const regionLike =
+    /\b(?:ON|QC|BC|AB|MB|SK|NS|NB|NL|PE|NT|NU|YT)\b/i.test(last) ||
+    /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(last) ||
+    /\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/i.test(last);
+
+  return regionLike ? parts[parts.length - 2] : '';
+}
+
+function hub_stdContactsSafeText_(value, maxLen) {
+  let s = String(value == null ? '' : value);
+
+  s = s.replace(
+    /(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,
+    '$1[REDACTED]'
+  );
+
+  s = s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED_KEY]');
+
+  s = s.replace(
+    /([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,
+    '$1[REDACTED]'
+  );
+
+  return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+}
+
+/* === HUB_STD_CONTACTS_R1_4_END === */
