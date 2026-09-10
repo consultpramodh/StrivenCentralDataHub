@@ -1,169 +1,123 @@
 /**
  * STRIVEN CENTRAL DATA HUB
  * 90_Tests
- * CURRENT TEST ONLY — STD CONTACTS FULL REFRESH
- * R1.4
+ * CURRENT TEST ONLY — STD LOCATIONS SCHEMA DISCOVERY
+ * R1.5
  *
- * This test writes DATA_CONTACTS in the Central Hub only.
- * It does not write to Striven and does not modify source projects.
+ * READ-ONLY against Striven.
+ * Fetches only two sample rows.
+ * Does not write DATA_LOCATIONS.
+ * Does not modify any registered source project.
  */
 
-function test_StdContactsRefreshAndVerify() {
-  const result = hub_refreshStdContacts();
+function test_StdLocationsReportSchema() {
+  const startedMs = Date.now();
+  const props = PropertiesService.getScriptProperties();
+  const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+  const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+  const reportUrl = String(props.getProperty('STRIVEN_STD_LOCATIONS_REPORT_URL') || '').trim();
+  const missingProperties = [];
+  if (!clientId) missingProperties.push('CLIENT_ID');
+  if (!clientSecret) missingProperties.push('CLIENT_SECRET');
+  if (!reportUrl) missingProperties.push('STRIVEN_STD_LOCATIONS_REPORT_URL');
+  if (missingProperties.length) throw new Error('Missing Script Properties: ' + missingProperties.join(', '));
+  if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) throw new Error('STRIVEN_STD_LOCATIONS_REPORT_URL must use https://api.striven.com/.');
 
-  if (!result || result.status !== 'PASS') {
-    throw new Error('hub_refreshStdContacts did not return PASS.');
-  }
-
-  if (!result.rows || result.rows < 1) {
-    throw new Error('STD Contacts refresh returned no rows.');
-  }
-
-  if (result.strivenWritesPerformed !== false) {
-    throw new Error('Safety assertion failed: Striven writes must be false.');
-  }
-
-  if (result.sourceProjectsModified !== false) {
-    throw new Error('Safety assertion failed: source-project modifications must be false.');
-  }
-
-  const schema = hub_stdContactsSchema_();
-  if (schema.length !== 12) {
-    throw new Error('STD Contacts source schema must contain exactly 12 canonical fields.');
-  }
-
-  const aliasFailures = schema.filter(function(def) {
-    const canonicalNorm = String(def.canonical || '')
-      .replace(/[^A-Za-z0-9]/g, '')
-      .toLowerCase();
-
-    return !(def.aliases || []).some(function(alias) {
-      return String(alias || '')
-        .replace(/[^A-Za-z0-9]/g, '')
-        .toLowerCase() === canonicalNorm;
-    });
-  }).map(function(def) {
-    return def.canonical;
+  const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+  const pageUrl = testLocationsPagedUrl_(reportUrl, 0, 2);
+  const response = UrlFetchApp.fetch(pageUrl, {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + tokenInfo.accessToken, Accept: 'application/json' },
+    muteHttpExceptions: true
   });
+  const code=response.getResponseCode(), text=response.getContentText();
+  if (code < 200 || code >= 300) throw new Error('STD Locations report fetch failed HTTP '+code+': '+testLocationsSafeText_(text,500));
+  let payload; try { payload=JSON.parse(text); } catch(e) { throw new Error('STD Locations report returned non-JSON content.'); }
+  const rows=testLocationsExtractRows_(payload).slice(0,2);
+  if(!rows.length) throw new Error('STD Locations report returned zero sample rows.');
 
-  if (aliasFailures.length) {
-    throw new Error(
-      'Alias standard failure. Canonical missing from alias set for: ' +
-      aliasFailures.join(', ')
-    );
-  }
+  const actualFields=testLocationsFieldUnion_(rows);
+  const schema=testLocationsSchema_();
+  const audit=testLocationsAuditSchema_(actualFields,schema);
+  const preferred=testLocationsPreferredHeaders_();
+  const nonPreferred=actualFields.filter(function(f){return preferred.indexOf(f)<0;});
+  const status=(audit.missingCanonicalFields.length===0 && audit.ambiguousCanonicalFields.length===0 && audit.unexpectedSourceFields.length===0 && actualFields.length===schema.length && nonPreferred.length===0) ? 'PASS' : 'REVIEW_SCHEMA';
 
-  const expectedHeaders = hub_stdContactsHeaders_();
-  const sh = SpreadsheetApp.getActive().getSheetByName('DATA_CONTACTS');
-
-  if (!sh) throw new Error('DATA_CONTACTS is missing after refresh.');
-
-  const actualHeaders = sh
-    .getRange(1, 1, 1, expectedHeaders.length)
-    .getDisplayValues()[0];
-
-  if (JSON.stringify(actualHeaders) !== JSON.stringify(expectedHeaders)) {
-    throw new Error(
-      'DATA_CONTACTS header mismatch. Expected=' +
-      JSON.stringify(expectedHeaders) +
-      '; Actual=' +
-      JSON.stringify(actualHeaders)
-    );
-  }
-
-  const actualRows = Math.max(0, sh.getLastRow() - 1);
-
-  if (actualRows !== result.rows) {
-    throw new Error(
-      'DATA_CONTACTS row-count mismatch. Refresh=' +
-      result.rows +
-      '; Sheet=' +
-      actualRows
-    );
-  }
-
-  const ix = {};
-  expectedHeaders.forEach(function(header, index) {
-    ix[header] = index + 1;
-  });
-
-  const customerIds = sh.getRange(2, ix.CustomerId, actualRows, 1).getDisplayValues();
-  const customerNumbers = sh.getRange(2, ix.CustomerNumber, actualRows, 1).getDisplayValues();
-  const contactIds = sh.getRange(2, ix.ContactId, actualRows, 1).getDisplayValues();
-  const entityTypes = sh.getRange(2, ix.EntityType, actualRows, 1).getDisplayValues();
-  const entityIds = sh.getRange(2, ix.EntityId, actualRows, 1).getDisplayValues();
-  const keys = sh.getRange(2, ix.CustomerContactKey, actualRows, 1).getDisplayValues();
-
-  const seen = {};
-  let customerNumberMismatch = 0;
-  let entityTypeMismatch = 0;
-  let entityIdMismatch = 0;
-  let relationshipKeyMismatch = 0;
-  let duplicateRelationshipKeys = 0;
-
-  for (let i = 0; i < actualRows; i++) {
-    const customerId = String(customerIds[i][0] || '');
-    const customerNumber = String(customerNumbers[i][0] || '');
-    const contactId = String(contactIds[i][0] || '');
-    const entityType = String(entityTypes[i][0] || '');
-    const entityId = String(entityIds[i][0] || '');
-    const key = String(keys[i][0] || '');
-    const expectedKey = customerId + '|' + contactId;
-
-    if (customerId !== customerNumber) customerNumberMismatch++;
-    if (entityType !== 'CONTACT') entityTypeMismatch++;
-    if (entityId !== contactId) entityIdMismatch++;
-    if (key !== expectedKey) relationshipKeyMismatch++;
-
-    if (seen[key]) duplicateRelationshipKeys++;
-    else seen[key] = true;
-  }
-
-  if (
-    customerNumberMismatch ||
-    entityTypeMismatch ||
-    entityIdMismatch ||
-    relationshipKeyMismatch ||
-    duplicateRelationshipKeys
-  ) {
-    throw new Error(
-      'Derived-field verification failed. ' +
-      JSON.stringify({
-        customerNumberMismatch: customerNumberMismatch,
-        entityTypeMismatch: entityTypeMismatch,
-        entityIdMismatch: entityIdMismatch,
-        relationshipKeyMismatch: relationshipKeyMismatch,
-        duplicateRelationshipKeys: duplicateRelationshipKeys
-      })
-    );
-  }
-
-  const logResult = {
-    status: 'PASS',
-    test: 'test_StdContactsRefreshAndVerify',
-    dataset: 'CONTACTS',
-    targetSheet: 'DATA_CONTACTS',
-    rows: result.rows,
-    reportPageCalls: result.reportPageCalls,
-    pageSize: result.pageSize,
-    tokenRequestMade: result.tokenRequestMade,
-    totalApiCallsThisRun: result.totalApiCallsThisRun,
-    sourceCanonicalFieldCount: schema.length,
-    outputColumnCount: expectedHeaders.length,
-    canonicalHeaders: expectedHeaders,
-    sourceToCanonical: result.sourceToCanonical,
-    aliasStandard: 'PASS_FOR_ALL_12_EXTERNAL_FIELDS',
-    customerNumberEqualsCustomerIdVerified: true,
-    entityTypeVerified: true,
-    entityIdVerified: true,
-    customerContactKeyVerified: true,
-    duplicateCustomerContactKeys: 0,
-    sheetRowCountVerified: true,
-    strivenWritesPerformed: false,
-    sourceProjectsModified: false,
-    nextStep: 'After PASS, sync verified R1.4 source to GitHub; keep Contacts refresh manual until consumer migration validation.'
+  const result={
+    status:status,
+    test:'test_StdLocationsReportSchema',
+    reportConfigured:true,
+    reportHost:'api.striven.com',
+    oauth:'PASS',
+    sampleRows:rows.length,
+    expectedCanonicalFieldCount:schema.length,
+    actualFieldCount:actualFields.length,
+    actualFields:actualFields,
+    canonicalToSource:audit.canonicalToSource,
+    sourceToCanonical:audit.sourceToCanonical,
+    missingCanonicalFields:audit.missingCanonicalFields,
+    ambiguousCanonicalFields:audit.ambiguousCanonicalFields,
+    unexpectedSourceFields:audit.unexpectedSourceFields,
+    preferredDisplayNames:preferred,
+    nonPreferredDisplayNames:nonPreferred,
+    derivedWithoutReportSlots:[
+      'CustomerNumber = CustomerId',
+      'CustomerStatus = Active (from report filter)',
+      'LocationIsActive = true (from report filter)',
+      'LocationProvince = Ontario (from report filter)',
+      'NormalizedLocationPhone',
+      'NormalizedLocationAddress',
+      'NormalizedLocationPostalCode',
+      'LocationKey = LocationId',
+      'CustomerLocationKey = CustomerId|LocationId'
+    ],
+    filterExpectation:['Customer Status = Active','Location Full Address is set','Address State = Ontario','Location Active = Yes'],
+    writesPerformed:false,
+    dataLocationsWritten:false,
+    strivenWritesPerformed:false,
+    sourceProjectsModified:false,
+    tokenRequestMade:tokenInfo.requestedNewToken,
+    apiCallsThisRun:1+(tokenInfo.requestedNewToken?1:0),
+    elapsedMs:Date.now()-startedMs,
+    nextStep:status==='PASS'?'Build production hub_refreshStdLocations and full DATA_LOCATIONS validation.':'Adjust only the report headers/columns reported by this same test, then rerun it.'
   };
-
-  Logger.log(JSON.stringify(logResult, null, 2));
-  return logResult;
+  Logger.log(JSON.stringify(result,null,2));
+  return result;
 }
+
+function testLocationsSchema_(){
+  return [
+    {canonical:'LocationDateCreated',aliases:['LocationDateCreated','Location Date Created','CreatedOn','Created On','DateCreated','Date Created']},
+    {canonical:'CustomerId',aliases:['CustomerId','CustomerID','Customer Id','Customer ID','CustomerNumber','Customer Number']},
+    {canonical:'CustomerName',aliases:['CustomerName','Customer Name']},
+    {canonical:'LocationId',aliases:['LocationId','LocationID','Location Id','Location ID']},
+    {canonical:'LocationName',aliases:['LocationName','Location Name','Name']},
+    {canonical:'LocationPrimaryPhone',aliases:['LocationPrimaryPhone','Location Primary Phone','PrimaryPhone','Primary Phone']},
+    {canonical:'LocationFullAddress',aliases:['LocationFullAddress','Location Full Address','AddressFullAddress','Address Full Address','FullAddress','Full Address']},
+    {canonical:'LocationPostalCode',aliases:['LocationPostalCode','Location Postal Code','AddressZip','Address Zip','Zip','PostalCode','Postal Code']},
+    {canonical:'LocationAddressId',aliases:['LocationAddressId','Location Address Id','Location Address ID','AddressId','AddressID','Address Id','Address ID']},
+    {canonical:'LocationIsPrimary',aliases:['LocationIsPrimary','Location Is Primary','IsPrimaryLocation','Is Primary Location','Primary']},
+    {canonical:'LocationIsDefaultShipTo',aliases:['LocationIsDefaultShipTo','Location Is Default Ship To','IsDefaultShipTo','Is Default Ship To','DefaultShipTo','Default Ship To']},
+    {canonical:'LocationIsDefaultBillTo',aliases:['LocationIsDefaultBillTo','Location Is Default Bill To','IsDefaultBillTo','Is Default Bill To','DefaultBillTo','Default Bill To']},
+    {canonical:'LocationDateLastModified',aliases:['LocationDateLastModified','Location Date Last Modified','DateLastModified','Date Last Modified','LastModified','Last Modified']}
+  ];
+}
+function testLocationsPreferredHeaders_(){return ['LocationDateCreated','CustomerId','CustomerName','LocationId','LocationName','LocationPrimaryPhone','LocationFullAddress','LocationPostalCode','LocationAddressId','LocationIsPrimary','LocationIsDefaultShipTo','LocationIsDefaultBillTo','LocationDateLastModified'];}
+function testLocationsAuditSchema_(actualFields,schema){
+  const normToRaw={}; actualFields.forEach(function(raw){const n=testLocationsNormalize_(raw);if(!normToRaw[n])normToRaw[n]=[];normToRaw[n].push(raw);});
+  const canonicalToSource={},sourceToCanonical={},missing=[],ambiguous=[],accepted={};
+  schema.forEach(function(def){
+    const c=testLocationsNormalize_(def.canonical),aliases=(def.aliases||[]).slice();
+    if(!aliases.some(function(a){return testLocationsNormalize_(a)===c;})) throw new Error('Alias standard failure: canonical missing from alias set for '+def.canonical);
+    const matches=[];
+    aliases.forEach(function(a){const n=testLocationsNormalize_(a);accepted[n]=true;(normToRaw[n]||[]).forEach(function(raw){if(matches.indexOf(raw)<0)matches.push(raw);});});
+    if(matches.length===0) missing.push(def.canonical); else if(matches.length>1) ambiguous.push({canonical:def.canonical,sourceFields:matches}); else {canonicalToSource[def.canonical]=matches[0];sourceToCanonical[matches[0]]=def.canonical;}
+  });
+  const unexpected=actualFields.filter(function(raw){return !accepted[testLocationsNormalize_(raw)];});
+  return {canonicalToSource:canonicalToSource,sourceToCanonical:sourceToCanonical,missingCanonicalFields:missing,ambiguousCanonicalFields:ambiguous,unexpectedSourceFields:unexpected};
+}
+function testLocationsFieldUnion_(rows){const out=[];rows.forEach(function(r){Object.keys(r||{}).forEach(function(k){if(out.indexOf(k)<0)out.push(k);});});return out;}
+function testLocationsNormalize_(v){return String(v==null?'':v).replace(/[^A-Za-z0-9]/g,'').toLowerCase();}
+function testLocationsPagedUrl_(reportUrl,pageIndex,pageSize){let url=String(reportUrl||'').trim();url=url.replace(/([?&])pageIndex=\d+(&?)/ig,function(_,lead,tail){return tail?lead:'';}).replace(/([?&])pageSize=\d+(&?)/ig,function(_,lead,tail){return tail?lead:'';}).replace(/[?&]$/,'');const sep=url.indexOf('?')>=0?'&':'?';return url+sep+'pageIndex='+encodeURIComponent(pageIndex)+'&pageSize='+encodeURIComponent(pageSize);}
+function testLocationsExtractRows_(payload){if(Array.isArray(payload))return payload;if(!payload||typeof payload!=='object')return[];const c=[payload.data,payload.Data,payload.results,payload.Results,payload.items,payload.Items,payload.rows,payload.Rows,payload.records,payload.Records];for(let i=0;i<c.length;i++)if(Array.isArray(c[i]))return c[i];const keys=Object.keys(payload);for(let i=0;i<keys.length;i++){const v=payload[keys[i]];if(Array.isArray(v)&&v.length&&typeof v[0]==='object'&&!Array.isArray(v[0]))return v;}return[];}
+function testLocationsSafeText_(value,maxLen){let s=String(value==null?'':value);s=s.replace(/(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,'$1[REDACTED]');s=s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g,'[REDACTED_KEY]');s=s.replace(/([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,'$1[REDACTED]');return s.length<=maxLen?s:s.substring(0,maxLen)+'...';}
