@@ -1280,69 +1280,264 @@ function obExceptionRow_(runId, row, reason, details) {
 }
 
 function obBuildEmailHtml_(rep, rows, total, mode, timezone) {
-  const now = Utilities.formatDate(new Date(), String(timezone), 'yyyy-MM-dd h:mm a z');
-  const sorted = rows.slice().sort((a, b) => {
-    const an = String(a.CustomerName || '').toLowerCase();
-    const bn = String(b.CustomerName || '').toLowerCase();
-    if (an !== bn) return an.localeCompare(bn);
-    return String(a.TransactionDate || '').localeCompare(String(b.TransactionDate || ''));
-  });
+  const tz = String(timezone || 'America/Toronto');
+  const reportDate = Utilities.formatDate(new Date(), tz, 'MMMM d, yyyy');
+  const summary = obBuildRepFinancialSummary_(rows);
+  const aging = obBuildInvoiceAging_(rows, tz);
+  const firstName = String(rep.name || '').trim().split(/\s+/)[0] || 'there';
 
   const banner = mode === 'TEST'
-    ? '<div style="padding:10px 12px;background:#f2f2f2;border:1px solid #d7d7d7;margin-bottom:16px;"><strong>TEST MODE</strong> — Intended for ' + obHtml_(rep.name) + '. This message was sent only to the configured admin test recipient.</div>'
+    ? '<div style="background:#fff7e8;border:1px solid #d9b875;border-left:4px solid #b56b32;padding:11px 14px;margin-bottom:14px;font-size:12px;line-height:1.5;border-radius:3px;">' +
+        '<strong>TEST MODE</strong><br>' +
+        'Intended Sales Rep: <strong>' + obHtml_(rep.name) + '</strong><br>' +
+        'Delivered to the configured admin test recipient.' +
+      '</div>'
     : '';
 
-  const bodyRows = sorted.map(row => '<tr>' +
-    '<td>' + obHtml_(row.CustomerNumber) + '</td>' +
-    '<td>' + obHtml_(row.CustomerName) + '</td>' +
-    '<td>' + obHtml_(row.TransactionType) + '</td>' +
-    '<td>' + obHtml_(row.TransactionNumber) + '</td>' +
-    '<td>' + obHtml_(row.TransactionDate) + '</td>' +
-    '<td style="text-align:right;white-space:nowrap;">' + obMoney_(row.TransactionAmount) + '</td>' +
-    '<td style="text-align:right;white-space:nowrap;font-weight:600;">' + obMoney_(row.OpenBalance) + '</td>' +
-    '<td>' + obHtml_(row.TransactionMemo) + '</td>' +
-  '</tr>').join('');
+  const netTitle = summary.netPosition < 0
+    ? 'NET CREDIT POSITION'
+    : 'NET RECEIVABLE POSITION';
+  const netWord = summary.netPosition < 0 ? 'CREDIT' : 'OWING';
+  const netAmount = obMoney_(Math.abs(summary.netPosition));
 
-  return '<div style="font-family:Arial,sans-serif;color:#222;line-height:1.4;">' +
-    banner +
-    '<h2 style="margin:0 0 6px;">Open Balance Report</h2>' +
-    '<div style="margin-bottom:14px;"><strong>Sales Rep:</strong> ' + obHtml_(rep.name) + '<br>' +
-    '<strong>Generated:</strong> ' + obHtml_(now) + '<br>' +
-    '<strong>Rows:</strong> ' + rows.length + '<br>' +
-    '<strong>Total Open Balance:</strong> ' + obMoney_(total) + '</div>' +
-    '<table style="border-collapse:collapse;width:100%;font-size:12px;">' +
-      '<thead><tr>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Customer #</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Customer</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Type</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Transaction #</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Date</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:right;">Amount</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:right;">Open Balance</th>' +
-        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Memo</th>' +
-      '</tr></thead>' +
-      '<tbody>' + bodyRows + '</tbody>' +
-    '</table>' +
-    '<p style="margin-top:16px;color:#666;font-size:11px;">This report is automatically generated from the Striven Central Data Hub. It contains only rows assigned to the named sales rep by the configured authoritative owner field.</p>' +
+  let agingHtml = '';
+  if (aging.available) {
+    const bucket = function(label, amount, bg, fg) {
+      return '<td style="width:20%;padding:12px 7px;text-align:center;background:' + bg + ';border:1px solid #dedbd5;">' +
+        '<div style="font-size:10px;color:' + fg + ';margin-bottom:5px;text-transform:uppercase;">' + obHtml_(label) + '</div>' +
+        '<div style="font-size:14px;font-weight:700;color:#272727;">' + obMoney_(amount) + '</div>' +
+      '</td>';
+    };
+    agingHtml =
+      '<div style="font-size:11px;font-weight:700;color:#55504b;text-transform:uppercase;letter-spacing:.8px;margin:0 0 8px;">Open Invoice Aging</div>' +
+      '<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin-bottom:22px;font-size:12px;"><tr>' +
+        bucket('Current', aging.current, '#f4f2ee', '#77716a') +
+        bucket('1–30 Days', aging.days1to30, '#fbf6eb', '#8d7047') +
+        bucket('31–60 Days', aging.days31to60, '#faf0e8', '#a76035') +
+        bucket('61–90 Days', aging.days61to90, '#f8ece7', '#9d5238') +
+        bucket('90+ Days', aging.days90plus, '#f7e8e4', '#94412f') +
+      '</tr></table>';
+  } else {
+    agingHtml =
+      '<div style="border:1px solid #e2ddd6;background:#faf9f7;padding:12px 14px;margin-bottom:22px;font-size:12px;color:#6c6761;line-height:1.5;">' +
+        '<strong>Open Invoice Aging</strong><br>' +
+        'Aging will display here once invoice Due Date is available from Striven. Transaction Date is not used as a substitute.' +
+      '</div>';
+  }
+
+  const attachmentName =
+    'Open Balance Report - ' + rep.name + ' - ' +
+    Utilities.formatDate(new Date(), tz, 'MMM d, yyyy') + '.xlsx';
+
+  return '<div style="margin:0;padding:0;background:#f3f1ed;font-family:Arial,Helvetica,sans-serif;color:#272727;">' +
+    '<div style="max-width:700px;margin:0 auto;padding:28px 16px;">' +
+      banner +
+      '<div style="background:#ffffff;border:1px solid #dedbd5;border-radius:6px;overflow:hidden;">' +
+
+        '<div style="background:#272727;padding:22px 26px;border-bottom:5px solid #a44932;">' +
+          '<div style="font-size:12px;color:#d8d4cd;text-transform:uppercase;letter-spacing:1.1px;margin-bottom:6px;">Classic Fireplace &amp; BBQ Store</div>' +
+          '<div style="font-size:25px;font-weight:600;color:#ffffff;line-height:1.2;">Accounts Receivable</div>' +
+          '<div style="font-size:14px;color:#ddd8d1;margin-top:5px;">Your Open Balance Report</div>' +
+        '</div>' +
+
+        '<div style="padding:26px;">' +
+          '<p style="margin:0 0 17px;font-size:15px;">Hi ' + obHtml_(firstName) + ',</p>' +
+          '<p style="margin:0 0 22px;font-size:15px;line-height:1.6;color:#3b3b3b;">' +
+            'Attached is your current Open Balance Report showing your customers\' outstanding invoices, deposits and credits.' +
+          '</p>' +
+
+          '<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin-bottom:12px;font-size:13px;"><tr>' +
+            '<td style="width:50%;padding:16px;background:#f7f3ee;border:1px solid #dedbd5;">' +
+              '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:#77716a;margin-bottom:5px;">Open Invoices</div>' +
+              '<div style="font-size:24px;font-weight:700;color:#272727;">' + obMoney_(summary.openInvoices) + '</div>' +
+              '<div style="font-size:11px;color:#77716a;margin-top:5px;">' + summary.invoiceCount + ' open invoice' + (summary.invoiceCount === 1 ? '' : 's') + '</div>' +
+            '</td>' +
+            '<td style="width:50%;padding:16px;background:#f4f2ee;border:1px solid #dedbd5;">' +
+              '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:#77716a;margin-bottom:5px;">Customer Deposits / Credits</div>' +
+              '<div style="font-size:24px;font-weight:700;color:#272727;">' + obMoney_(summary.customerCredits) + '</div>' +
+              '<div style="font-size:11px;color:#77716a;margin-top:5px;">' + summary.creditCount + ' deposit' + (summary.creditCount === 1 ? '' : 's') + ' / credit' + (summary.creditCount === 1 ? '' : 's') + '</div>' +
+            '</td>' +
+          '</tr></table>' +
+
+          '<div style="background:#f7f3ee;border-left:5px solid #a44932;padding:17px 20px;margin-bottom:22px;">' +
+            '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:#77716a;margin-bottom:5px;">' + netTitle + '</div>' +
+            '<div style="font-size:28px;font-weight:700;color:#272727;">' + netAmount + ' <span style="font-size:15px;">' + netWord + '</span></div>' +
+            '<div style="font-size:11px;color:#77716a;margin-top:6px;">Across ' + summary.customerCount + ' customer' + (summary.customerCount === 1 ? '' : 's') + '</div>' +
+          '</div>' +
+
+          agingHtml +
+
+          '<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin-bottom:22px;font-size:13px;">' +
+            '<tr><td style="padding:9px 0;border-bottom:1px solid #ebe8e3;color:#77716a;width:50%;">Sales Representative</td>' +
+                '<td style="padding:9px 0;border-bottom:1px solid #ebe8e3;font-weight:600;">' + obHtml_(rep.name) + '</td></tr>' +
+            '<tr><td style="padding:9px 0;border-bottom:1px solid #ebe8e3;color:#77716a;">Customers</td>' +
+                '<td style="padding:9px 0;border-bottom:1px solid #ebe8e3;font-weight:600;">' + summary.customerCount + '</td></tr>' +
+            '<tr><td style="padding:9px 0;border-bottom:1px solid #ebe8e3;color:#77716a;">Open Invoices</td>' +
+                '<td style="padding:9px 0;border-bottom:1px solid #ebe8e3;font-weight:600;">' + summary.invoiceCount + '</td></tr>' +
+            '<tr><td style="padding:9px 0;border-bottom:1px solid #ebe8e3;color:#77716a;">Report Date</td>' +
+                '<td style="padding:9px 0;border-bottom:1px solid #ebe8e3;font-weight:600;">' + obHtml_(reportDate) + '</td></tr>' +
+          '</table>' +
+
+          '<div style="border:1px solid #d8d4ce;background:#faf9f7;padding:15px 16px;border-radius:4px;margin-bottom:21px;">' +
+            '<div style="font-size:10px;font-weight:700;color:#a44932;text-transform:uppercase;letter-spacing:.9px;margin-bottom:6px;">Attached Report</div>' +
+            '<div style="font-size:14px;font-weight:600;color:#292929;">' + obHtml_(attachmentName) + '</div>' +
+            '<div style="font-size:12px;color:#77716a;margin-top:5px;">Customer-level details for open invoices, deposits and credits.</div>' +
+          '</div>' +
+
+          '<div style="border-top:1px solid #ebe8e3;padding-top:17px;font-size:14px;line-height:1.55;color:#44413e;">' +
+            'Please review the attached customer-level detail for any balances, deposits or credits that appear incorrect or require follow-up.' +
+          '</div>' +
+
+          '<p style="margin:25px 0 0;font-size:14px;line-height:1.55;">Regards,<br><strong>Classic Fireplace &amp; BBQ Store</strong><br>' +
+            '<span style="color:#77716a;">Accounts Receivable</span></p>' +
+        '</div>' +
+      '</div>' +
+
+      '<div style="text-align:center;padding:14px 12px;font-size:10px;color:#8b8781;line-height:1.5;">' +
+        '<strong>Confidential</strong> — This report contains customer financial information and is intended only for the named Sales Representative.' +
+      '</div>' +
+    '</div>' +
   '</div>';
 }
 
 function obBuildEmailText_(rep, rows, total, mode, timezone) {
-  const now = Utilities.formatDate(new Date(), String(timezone), 'yyyy-MM-dd h:mm a z');
-  const prefix = mode === 'TEST' ? 'TEST MODE — Intended for ' + rep.name + '\n\n' : '';
-  const lines = rows.map(row => [
-    row.CustomerNumber || '', row.CustomerName || '', row.TransactionType || '',
-    row.TransactionNumber || '', row.TransactionDate || '',
-    obMoney_(row.TransactionAmount), obMoney_(row.OpenBalance), row.TransactionMemo || ''
-  ].join(' | '));
+  const tz = String(timezone || 'America/Toronto');
+  const summary = obBuildRepFinancialSummary_(rows);
+  const aging = obBuildInvoiceAging_(rows, tz);
+  const firstName = String(rep.name || '').trim().split(/\s+/)[0] || 'there';
+  const prefix = mode === 'TEST'
+    ? 'TEST MODE — Intended for ' + rep.name + '\n\n'
+    : '';
+
+  const netLabel = summary.netPosition < 0
+    ? 'Net Credit Position'
+    : 'Net Receivable Position';
+  const netWord = summary.netPosition < 0 ? 'CREDIT' : 'OWING';
+
+  let agingText = 'Open Invoice Aging: Due Date enrichment pending.';
+  if (aging.available) {
+    agingText =
+      'Open Invoice Aging:\n' +
+      'Current: ' + obMoney_(aging.current) + '\n' +
+      '1–30 Days: ' + obMoney_(aging.days1to30) + '\n' +
+      '31–60 Days: ' + obMoney_(aging.days31to60) + '\n' +
+      '61–90 Days: ' + obMoney_(aging.days61to90) + '\n' +
+      '90+ Days: ' + obMoney_(aging.days90plus);
+  }
 
   return prefix +
-    'Open Balance Report\n' +
-    'Sales Rep: ' + rep.name + '\n' +
-    'Generated: ' + now + '\n' +
-    'Rows: ' + rows.length + '\n' +
-    'Total Open Balance: ' + obMoney_(total) + '\n\n' +
-    lines.join('\n');
+    'Accounts Receivable — Your Open Balance Report\n\n' +
+    'Hi ' + firstName + ',\n\n' +
+    'Attached is your current Open Balance Report showing your customers\' outstanding invoices, deposits and credits.\n\n' +
+    'Open Invoices: ' + obMoney_(summary.openInvoices) + ' (' + summary.invoiceCount + ')\n' +
+    'Customer Deposits / Credits: ' + obMoney_(summary.customerCredits) + ' (' + summary.creditCount + ')\n' +
+    netLabel + ': ' + obMoney_(Math.abs(summary.netPosition)) + ' ' + netWord + '\n' +
+    'Customers: ' + summary.customerCount + '\n\n' +
+    agingText + '\n\n' +
+    'Please review the attached customer-level detail for any balances, deposits or credits that appear incorrect or require follow-up.\n\n' +
+    'Regards,\nClassic Fireplace & BBQ Store\nAccounts Receivable';
+}
+
+function obBuildRepFinancialSummary_(rows) {
+  const seenCustomers = Object.create(null);
+  let invoiceCount = 0;
+  let creditCount = 0;
+  let openInvoices = 0;
+  let customerCredits = 0;
+
+  rows.forEach(function(row) {
+    const customerKey = String(row.CustomerNumber || row.CustomerName || '').trim();
+    if (customerKey) seenCustomers[customerKey] = true;
+
+    const type = String(row.TransactionType || '').trim().toUpperCase();
+    const open = obToNumber_(row.OpenBalance);
+
+    if (type === 'INVOICE') {
+      invoiceCount++;
+      if (open > 0) openInvoices += open;
+      return;
+    }
+
+    if (
+      type === 'PAYMENT' ||
+      type === 'CREDIT MEMO' ||
+      type === 'CREDITMEMO'
+    ) {
+      creditCount++;
+      customerCredits += Math.abs(open);
+    }
+  });
+
+  return {
+    invoiceCount: invoiceCount,
+    creditCount: creditCount,
+    customerCount: Object.keys(seenCustomers).length,
+    openInvoices: openInvoices,
+    customerCredits: customerCredits,
+    netPosition: openInvoices - customerCredits
+  };
+}
+
+function obBuildInvoiceAging_(rows, timezone) {
+  const todayText = Utilities.formatDate(new Date(), String(timezone), 'yyyy-MM-dd');
+  const today = new Date(todayText + 'T00:00:00');
+  const out = {
+    available: false,
+    current: 0,
+    days1to30: 0,
+    days31to60: 0,
+    days61to90: 0,
+    days90plus: 0
+  };
+
+  rows.forEach(function(row) {
+    const type = String(row.TransactionType || '').trim().toUpperCase();
+    if (type !== 'INVOICE') return;
+
+    const open = obToNumber_(row.OpenBalance);
+    if (open <= 0) return;
+
+    const dueRaw =
+      row.DueDate ||
+      row['Due Date'] ||
+      row.InvoiceDueDate ||
+      row['Invoice Due Date'];
+
+    if (!dueRaw) return;
+
+    const due = obParseDate_(dueRaw);
+    if (!due) return;
+
+    out.available = true;
+    const daysPastDue = Math.floor((today.getTime() - due.getTime()) / 86400000);
+
+    if (daysPastDue <= 0) out.current += open;
+    else if (daysPastDue <= 30) out.days1to30 += open;
+    else if (daysPastDue <= 60) out.days31to60 += open;
+    else if (daysPastDue <= 90) out.days61to90 += open;
+    else out.days90plus += open;
+  });
+
+  return out;
+}
+
+function obParseDate_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+  }
+
+  const text = String(value || '').trim();
+  if (!text) return null;
+
+  let m = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+
+  m = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+
+  const parsed = new Date(text);
+  if (isNaN(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
 }
 
 function obCheckConfigurationReadiness_(ss, control) {
