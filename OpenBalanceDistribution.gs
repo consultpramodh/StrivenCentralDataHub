@@ -602,8 +602,11 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
     page.records.forEach(function(record) {
       const transactionNumber = String(
         record.txnNumber ||
+        record.TxnNumber ||
         record.transactionNumber ||
+        record.TransactionNumber ||
         record.invoiceNumber ||
+        record.InvoiceNumber ||
         ''
       ).trim();
       const comparable = obNormalizeTransactionNumber_(transactionNumber);
@@ -611,7 +614,9 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
 
       const invoiceId = String(
         record.id ||
+        record.Id ||
         record.invoiceId ||
+        record.InvoiceId ||
         record.InvoiceID ||
         ''
       ).trim();
@@ -679,8 +684,11 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
 
     const detailNumber = String(
       detail.txnNumber ||
+      detail.TxnNumber ||
       detail.transactionNumber ||
+      detail.TransactionNumber ||
       detail.invoiceNumber ||
+      detail.InvoiceNumber ||
       ''
     ).trim();
 
@@ -693,9 +701,9 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
       return;
     }
 
-    const salesRep = detail.salesRep;
-    const salesRepId = salesRep && String(salesRep.id || '').trim();
-    const salesRepName = salesRep && String(salesRep.name || '').trim();
+    const salesRep = detail.salesRep || detail.SalesRep;
+    const salesRepId = salesRep && String(salesRep.id || salesRep.Id || '').trim();
+    const salesRepName = salesRep && String(salesRep.name || salesRep.Name || '').trim();
 
     if (!salesRepId || !/^\d+$/.test(salesRepId) || !salesRepName) {
       byTransaction[comparable] = {
@@ -990,11 +998,13 @@ function obCacheEmployeeProfiles_(ss, employeeIds, resolution) {
 
     sheet.getRange(targetRow, 1, 1, 14).setValues([[
       id,
-      employee.EmployeeNumber == null ? '' : String(employee.EmployeeNumber),
+      (employee.EmployeeNumber == null && employee.employeeNumber == null)
+        ? ''
+        : String(employee.EmployeeNumber == null ? employee.employeeNumber : employee.EmployeeNumber),
       fullName,
       primaryEmail,
-      employee.Status === true,
-      employee.SystemUser === true,
+      (employee.Status === true || employee.status === true),
+      (employee.SystemUser === true || employee.systemUser === true),
       division.Name || division.name || '',
       location.Name || location.name || '',
       jobTitle.Name || jobTitle.name || '',
@@ -1019,11 +1029,11 @@ function obCacheEmployeeProfiles_(ss, employeeIds, resolution) {
 
 function obEmployeeFullName_(employee) {
   return [
-    employee.Prefix,
-    employee.Firstname,
-    employee.MiddleName,
-    employee.Lastname,
-    employee.Suffix
+    employee.Prefix || employee.prefix,
+    employee.Firstname || employee.firstname || employee.firstName,
+    employee.MiddleName || employee.middleName,
+    employee.Lastname || employee.lastname || employee.lastName,
+    employee.Suffix || employee.suffix
   ].map(function(value) {
     return String(value || '').trim();
   }).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
