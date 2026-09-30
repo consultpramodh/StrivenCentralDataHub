@@ -580,6 +580,7 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
   let pageIndex = 0;
   let pagesFetched = 0;
   let apiCalls = 0;
+  let searchComplete = false;
 
   while (
     pageIndex < OB.DIRECT_API.SEARCH_MAX_PAGES &&
@@ -622,12 +623,19 @@ function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
       }
     });
 
-    const allTargetsSeen = targetNumbers.every(function(number) {
-      return !!matches[obNormalizeTransactionNumber_(number)];
-    });
-
-    if (allTargetsSeen || page.isLastPage || !page.records.length) break;
+    if (page.isLastPage || !page.records.length) {
+      searchComplete = true;
+      break;
+    }
     pageIndex++;
+  }
+
+  if (!searchComplete) {
+    throw new Error(
+      'Privacy stop: Invoice search did not reach the end of the result set ' +
+      'within the configured safety budget. No ownership was accepted because ' +
+      'transaction-number uniqueness could not be proven.'
+    );
   }
 
   const byTransaction = Object.create(null);
@@ -973,8 +981,8 @@ function obCacheEmployeeProfiles_(ss, employeeIds, resolution) {
       if (candidates.length === 1) targetRow = candidates[0];
     }
     if (!targetRow) {
-      sheet.insertRowAfter(Math.max(sheet.getLastRow(), 1));
-      targetRow = sheet.getLastRow();
+      targetRow = Math.max(sheet.getLastRow() + 1, 2);
+      obEnsureRows_(sheet, targetRow);
     }
 
     const profileStatus = primaryEmail ? 'VERIFIED' : 'VERIFIED_NO_EMAIL';
