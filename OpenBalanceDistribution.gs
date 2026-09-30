@@ -24,6 +24,8 @@ const OB = Object.freeze({
   }),
   REPORT_URL_PROPERTY: 'STRIVEN_OPEN_BALANCE_REPORT_URL',
   TRIGGER_FUNCTION: 'runOpenBalanceRepDistribution',
+  REFRESH_TRIGGER_FUNCTION: 'runOpenBalanceAutoRefresh',
+  PRIVATE_CONFIG_SHEET: 'OPEN_BALANCE_PRIVATE_CONFIG',
   DEFAULT_OWNER_FIELD: 'SalesRep',
   SENDER_NAME: 'Classic Fireplace & BBQ Store',
   CURRENCY: 'CAD'
@@ -32,6 +34,63 @@ const OB = Object.freeze({
 /** Production entry point. Intended for the biweekly installable trigger. */
 function runOpenBalanceRepDistribution() {
   return obRun_({ modeOverride: null, sendEmails: true, allowDisabled: false });
+}
+
+/**
+ * Unattended cache refresh.
+ * Safe before Sales Rep routing is ready: it refreshes DATA_OPEN_BALANCES
+ * without sending email and without substituting CreatedBy for SalesRep.
+ */
+function runOpenBalanceAutoRefresh() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return { ok: false, status: 'SKIPPED_LOCKED' };
+  }
+
+  try {
+    const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+    const control = obReadControl_(ss);
+
+    if (control.AUTO_REFRESH_ENABLED !== true) {
+      return { ok: false, status: 'AUTO_REFRESH_DISABLED' };
+    }
+
+    const report = obFetchReport_();
+    const ownerFieldRequested = String(control.OWNER_FIELD_REQUIRED || OB.DEFAULT_OWNER_FIELD).trim();
+    const ownerField = obFindField_(report.fields, ownerFieldRequested);
+
+    // Always cache the freshly fetched report before routing validation.
+    // This keeps DATA_OPEN_BALANCES current even while Sales Rep ownership is still being configured.
+    obWriteRawSnapshot_(ss, report.rows, ownerField);
+    obRecordRefresh_(ss, report.rows.length, 'SUCCESS');
+
+    obWriteRawSnapshot_(ss, report.rows, ownerField);
+    obRecordRefresh_(ss, report.rows.length, 'SUCCESS');
+
+    obSetControlValue_(ss, 'OWNER_FIELD_PRESENT', !!ownerField);
+    obSetControlValue_(
+      ss,
+      'STATUS',
+      ownerField ? 'REFRESHED_WAITING_ROUTING' : 'BLOCKED_PENDING_OWNER_FIELD'
+    );
+
+    const result = {
+      ok: true,
+      status: ownerField ? 'REFRESHED_WAITING_ROUTING' : 'REFRESHED_PENDING_OWNER_FIELD',
+      rows: report.rows.length,
+      ownerFieldPresent: !!ownerField
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } catch (err) {
+    try {
+      const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+      obRecordRefresh_(ss, '', 'FAILED: ' + String(err && err.message ? err.message : err).slice(0, 500));
+    } catch (loggingErr) {}
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** Manual no-email validation. Safe to run from the Apps Script editor. */
@@ -114,6 +173,53 @@ function openBalanceSetupAdminTestEmail() {
 }
 
 /**
+ * Installs both unattended triggers:
+ * 1) daily refresh of DATA_OPEN_BALANCES
+ * 2) biweekly rep distribution
+ *
+ * This is an infrastructure/deployment action, not an operator workflow.
+ * Once installed, no recurring manual refresh or send action is required.
+ */
+function installOpenBalanceAutomation() {
+  const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+  const control = obReadControl_(ss);
+  const tz = String(control.TIMEZONE || 'America/Toronto').trim();
+  const refreshHour = Number(control.REFRESH_HOUR == null ? 7 : control.REFRESH_HOUR);
+
+  if (!Number.isInteger(refreshHour) || refreshHour < 0 || refreshHour > 23) {
+    throw new Error('REFRESH_HOUR must be an integer from 0 to 23.');
+  }
+
+  const reportUrl = obGetReportUrl_();
+  if (!reportUrl) throw new Error('Open Balance report URL is not configured.');
+
+  obDeleteRefreshTriggers_();
+
+  const refreshTrigger = ScriptApp.newTrigger(OB.REFRESH_TRIGGER_FUNCTION)
+    .timeBased()
+    .everyDays(1)
+    .atHour(refreshHour)
+    .inTimezone(tz)
+    .create();
+
+  let distribution = null;
+  try {
+    distribution = installOpenBalanceBiweeklyTrigger();
+  } catch (err) {
+    // Keep the cache refresh alive even while Sales Rep routing is still being completed.
+    distribution = { ok: false, status: 'DISTRIBUTION_NOT_READY', error: String(err && err.message ? err.message : err) };
+  }
+
+  return {
+    ok: true,
+    refreshTriggerId: refreshTrigger.getUniqueId(),
+    refreshHour: refreshHour,
+    timezone: tz,
+    distribution: distribution
+  };
+}
+
+/**
  * Installs exactly one biweekly trigger using the control sheet settings.
  * Refuses installation while ownership routing is not ready.
  */
@@ -161,16 +267,25 @@ function removeOpenBalanceBiweeklyTrigger() {
   return { ok: true, removed: count };
 }
 
+function removeOpenBalanceAutomation() {
+  const refreshRemoved = obDeleteRefreshTriggers_();
+  const distributionRemoved = obDeleteDistributionTriggers_();
+  return { ok: true, refreshRemoved: refreshRemoved, distributionRemoved: distributionRemoved };
+}
+
 function openBalanceStatus() {
   const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
   const control = obReadControl_(ss);
   const reps = obReadRepConfig_(ss, false);
-  const triggerCount = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === OB.TRIGGER_FUNCTION).length;
+  const triggers = ScriptApp.getProjectTriggers();
+  const triggerCount = triggers.filter(t => t.getHandlerFunction() === OB.TRIGGER_FUNCTION).length;
+  const refreshTriggerCount = triggers.filter(t => t.getHandlerFunction() === OB.REFRESH_TRIGGER_FUNCTION).length;
   return {
     control: control,
     enabledRepCount: reps.length,
     triggerCount: triggerCount,
-    reportUrlConfigured: !!PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY)
+    refreshTriggerCount: refreshTriggerCount,
+    reportUrlConfigured: !!obGetReportUrl_()
   };
 }
 
@@ -310,9 +425,9 @@ function obRun_(options) {
 }
 
 function obFetchReport_() {
-  const url = PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY);
+  const url = obGetReportUrl_();
   if (!url) {
-    throw new Error('Missing Script Property ' + OB.REPORT_URL_PROPERTY + '. Run openBalanceSetupReportUrl().');
+    throw new Error('Open Balance report URL is not configured.');
   }
   if (!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(url)) {
     throw new Error('Stored open-balance report URL is not an expected Striven v2 report URL.');
@@ -590,8 +705,8 @@ function obCheckConfigurationReadiness_(ss, control) {
   const reps = obReadRepConfig_(ss, true);
   if (!reps.length) return { ready: false, reason: 'No enabled READY reps are configured.' };
   obBuildRepMap_(reps);
-  if (!PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY)) {
-    return { ready: false, reason: 'Striven report URL Script Property is missing.' };
+  if (!obGetReportUrl_()) {
+    return { ready: false, reason: 'Striven report URL is missing.' };
   }
   return { ready: true };
 }
@@ -605,6 +720,62 @@ function obDeleteDistributionTriggers_() {
     }
   });
   return count;
+}
+
+function obDeleteRefreshTriggers_() {
+  let count = 0;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === OB.REFRESH_TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+      count++;
+    }
+  });
+  return count;
+}
+
+function obGetReportUrl_() {
+  const scriptValue = String(
+    PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY) || ''
+  ).trim();
+  if (scriptValue) return scriptValue;
+
+  const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+  const sh = ss.getSheetByName(OB.PRIVATE_CONFIG_SHEET);
+  if (!sh || sh.getLastRow() < 2) return '';
+
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues();
+  for (const row of rows) {
+    if (String(row[0] || '').trim() === OB.REPORT_URL_PROPERTY) {
+      return String(row[1] || '').trim();
+    }
+  }
+  return '';
+}
+
+function obWriteRawSnapshot_(ss, rows, ownerField) {
+  const fetchedAt = new Date();
+  const runId = 'REFRESH-' + Utilities.formatDate(
+    fetchedAt,
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd-HHmmss'
+  );
+
+  const stagingRows = rows.map(row => obStagingRow_(
+    runId,
+    fetchedAt,
+    '',
+    row,
+    ownerField ? 'REFRESHED_PENDING_ROUTING' : 'REFRESHED_PENDING_OWNER_FIELD',
+    obHash_(JSON.stringify(row))
+  ));
+
+  obReplaceStaging_(ss, stagingRows);
+}
+
+function obRecordRefresh_(ss, rowCount, status) {
+  obSetControlValue_(ss, 'LAST_REFRESH_AT', new Date());
+  obSetControlValue_(ss, 'LAST_REFRESH_ROWS', rowCount);
+  obSetControlValue_(ss, 'LAST_REFRESH_STATUS', status);
 }
 
 function obFindField_(fields, requested) {
