@@ -1,0 +1,665 @@
+/**
+ * Classic Fireplace & BBQ Store
+ * Striven Central Data Hub — Sales Rep Open Balance Distribution
+ * Target Apps Script Project ID:
+ * 1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8
+ *
+ * Privacy model:
+ * - Source report is fetched once.
+ * - Every source row must resolve to exactly one enabled/READY rep.
+ * - Unknown, missing, or ambiguous ownership aborts the ENTIRE run before email.
+ * - TEST mode sends every rep-specific report only to ADMIN_TEST_EMAIL.
+ * - PRODUCTION mode sends exactly one recipient per rep. No CC/BCC.
+ * - CreatedBy is NEVER used as a substitute for SalesRep.
+ */
+
+const OB = Object.freeze({
+  SPREADSHEET_ID: '13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU',
+  SHEETS: Object.freeze({
+    CONTROL: 'OPEN_BALANCE_CONTROL',
+    REPS: 'OPEN_BALANCE_REP_CONFIG',
+    DATA: 'DATA_OPEN_BALANCES',
+    SEND_LOG: 'OPEN_BALANCE_SEND_LOG',
+    EXCEPTIONS: 'OPEN_BALANCE_EXCEPTIONS'
+  }),
+  REPORT_URL_PROPERTY: 'STRIVEN_OPEN_BALANCE_REPORT_URL',
+  TRIGGER_FUNCTION: 'runOpenBalanceRepDistribution',
+  DEFAULT_OWNER_FIELD: 'SalesRep',
+  SENDER_NAME: 'Classic Fireplace & BBQ Store',
+  CURRENCY: 'CAD'
+});
+
+/** Production entry point. Intended for the biweekly installable trigger. */
+function runOpenBalanceRepDistribution() {
+  return obRun_({ modeOverride: null, sendEmails: true, allowDisabled: false });
+}
+
+/** Manual no-email validation. Safe to run from the Apps Script editor. */
+function openBalanceDryRun() {
+  return obRun_({ modeOverride: 'DRY_RUN', sendEmails: false, allowDisabled: true });
+}
+
+/**
+ * Manual test send. Sends ALL rep reports only to ADMIN_TEST_EMAIL.
+ * It never sends to the rep addresses.
+ */
+function openBalanceTestSend() {
+  return obRun_({ modeOverride: 'TEST', sendEmails: true, allowDisabled: true });
+}
+
+/** Fetches the source once and updates source-schema readiness in OPEN_BALANCE_CONTROL. */
+function openBalanceAuditSource() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+    const control = obReadControl_(ss);
+    const report = obFetchReport_();
+    const ownerFieldRequested = String(control.OWNER_FIELD_REQUIRED || OB.DEFAULT_OWNER_FIELD).trim();
+    const ownerField = obFindField_(report.fields, ownerFieldRequested);
+    const present = !!ownerField;
+
+    obSetControlValue_(ss, 'OWNER_FIELD_PRESENT', present);
+    obSetControlValue_(
+      ss,
+      'STATUS',
+      present ? 'WAITING_FOR_REP_CONFIG' : 'BLOCKED_PENDING_OWNER_FIELD'
+    );
+
+    const result = {
+      ok: present,
+      totalRecords: report.rows.length,
+      fields: report.fields,
+      requestedOwnerField: ownerFieldRequested,
+      resolvedOwnerField: ownerField || null,
+      status: present ? 'WAITING_FOR_REP_CONFIG' : 'BLOCKED_PENDING_OWNER_FIELD'
+    };
+    console.log(JSON.stringify(result));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Prompts once for the tokenized Striven report URL and stores it in Script Properties. */
+function openBalanceSetupReportUrl() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Open Balance Report URL',
+    'Paste the complete Striven v2 report URL. It will be stored in Script Properties, not in the sheet.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return 'CANCELLED';
+  const url = String(response.getResponseText() || '').trim();
+  if (!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(url)) {
+    throw new Error('Invalid Striven report URL. Expected https://api.striven.com/v2/reports/...');
+  }
+  PropertiesService.getScriptProperties().setProperty(OB.REPORT_URL_PROPERTY, url);
+  return openBalanceAuditSource();
+}
+
+/** Stores the TEST-only recipient in OPEN_BALANCE_CONTROL. */
+function openBalanceSetupAdminTestEmail() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Admin Test Email',
+    'Enter the single email address that should receive ALL test-mode rep reports.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return 'CANCELLED';
+  const email = obValidateSingleEmail_(response.getResponseText());
+  const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+  obSetControlValue_(ss, 'ADMIN_TEST_EMAIL', email);
+  return { ok: true, adminTestEmail: email };
+}
+
+/**
+ * Installs exactly one biweekly trigger using the control sheet settings.
+ * Refuses installation while ownership routing is not ready.
+ */
+function installOpenBalanceBiweeklyTrigger() {
+  const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+  const control = obReadControl_(ss);
+  const readiness = obCheckConfigurationReadiness_(ss, control);
+  if (!readiness.ready) {
+    throw new Error('Trigger not installed: ' + readiness.reason);
+  }
+
+  obDeleteDistributionTriggers_();
+
+  const dayName = String(control.DAY || 'MONDAY').toUpperCase();
+  const dayMap = {
+    MONDAY: ScriptApp.WeekDay.MONDAY,
+    TUESDAY: ScriptApp.WeekDay.TUESDAY,
+    WEDNESDAY: ScriptApp.WeekDay.WEDNESDAY,
+    THURSDAY: ScriptApp.WeekDay.THURSDAY,
+    FRIDAY: ScriptApp.WeekDay.FRIDAY,
+    SATURDAY: ScriptApp.WeekDay.SATURDAY,
+    SUNDAY: ScriptApp.WeekDay.SUNDAY
+  };
+  if (!dayMap[dayName]) throw new Error('Unsupported DAY in OPEN_BALANCE_CONTROL: ' + dayName);
+
+  const hour = Number(control.HOUR);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+    throw new Error('HOUR must be an integer from 0 to 23.');
+  }
+
+  const tz = String(control.TIMEZONE || 'America/Toronto').trim();
+  const trigger = ScriptApp.newTrigger(OB.TRIGGER_FUNCTION)
+    .timeBased()
+    .everyWeeks(2)
+    .onWeekDay(dayMap[dayName])
+    .atHour(hour)
+    .inTimezone(tz)
+    .create();
+
+  return { ok: true, triggerId: trigger.getUniqueId(), cadence: 'EVERY_2_WEEKS', day: dayName, hour: hour, timezone: tz };
+}
+
+function removeOpenBalanceBiweeklyTrigger() {
+  const count = obDeleteDistributionTriggers_();
+  return { ok: true, removed: count };
+}
+
+function openBalanceStatus() {
+  const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+  const control = obReadControl_(ss);
+  const reps = obReadRepConfig_(ss, false);
+  const triggerCount = ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === OB.TRIGGER_FUNCTION).length;
+  return {
+    control: control,
+    enabledRepCount: reps.length,
+    triggerCount: triggerCount,
+    reportUrlConfigured: !!PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY)
+  };
+}
+
+function obRun_(options) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  const startedAt = new Date();
+  const runId = 'OB-' + Utilities.formatDate(startedAt, 'America/Toronto', 'yyyyMMdd-HHmmss') + '-' + Utilities.getUuid().slice(0, 8);
+
+  try {
+    const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+    const control = obReadControl_(ss);
+    const configuredMode = String(control.MODE || 'TEST').toUpperCase();
+    const mode = String(options.modeOverride || configuredMode).toUpperCase();
+
+    if (!options.allowDisabled && control.ENABLED !== true) {
+      return { ok: false, status: 'DISABLED', runId: runId, message: 'OPEN_BALANCE_CONTROL ENABLED is FALSE.' };
+    }
+
+    if (!['PRODUCTION', 'TEST', 'DRY_RUN'].includes(mode)) {
+      throw new Error('Unsupported MODE: ' + mode);
+    }
+
+    const report = obFetchReport_();
+    const ownerFieldRequested = String(control.OWNER_FIELD_REQUIRED || OB.DEFAULT_OWNER_FIELD).trim();
+    const ownerField = obFindField_(report.fields, ownerFieldRequested);
+
+    if (!ownerField) {
+      obSetControlValue_(ss, 'OWNER_FIELD_PRESENT', false);
+      obSetControlValue_(ss, 'STATUS', 'BLOCKED_PENDING_OWNER_FIELD');
+      obAppendException_(ss, [
+        runId,
+        new Date(),
+        'SCHEMA_MISSING_OWNER_FIELD',
+        '', '', '', '', '', '',
+        'Required field "' + ownerFieldRequested + '" was not found. Available fields: ' + report.fields.join(', '),
+        'BLOCKED'
+      ]);
+      throw new Error('Privacy stop: required owner field "' + ownerFieldRequested + '" is absent from the Striven report. CreatedBy will not be used as a substitute.');
+    }
+
+    obSetControlValue_(ss, 'OWNER_FIELD_PRESENT', true);
+
+    const reps = obReadRepConfig_(ss, true);
+    if (!reps.length) throw new Error('No enabled READY sales reps exist in OPEN_BALANCE_REP_CONFIG.');
+    const repByOwner = obBuildRepMap_(reps);
+
+    const routing = obRouteRows_(report.rows, ownerField, repByOwner, runId);
+    obReplaceStaging_(ss, routing.stagingRows);
+
+    if (routing.exceptions.length) {
+      routing.exceptions.forEach(row => obAppendException_(ss, row));
+      obSetControlValue_(ss, 'STATUS', 'BLOCKED_ROUTING_EXCEPTIONS');
+      throw new Error('Privacy stop: ' + routing.exceptions.length + ' row(s) could not be assigned to exactly one authorized rep. No emails were sent.');
+    }
+
+    // Critical invariant: every source row must be routed exactly once before ANY email.
+    if (routing.routedCount !== report.rows.length) {
+      obSetControlValue_(ss, 'STATUS', 'BLOCKED_ROUTING_COUNT_MISMATCH');
+      throw new Error('Privacy stop: routed row count (' + routing.routedCount + ') does not equal source row count (' + report.rows.length + ').');
+    }
+
+    obSetControlValue_(ss, 'STATUS', mode === 'DRY_RUN' ? 'DRY_RUN_VALIDATED' : 'READY');
+
+    if (!options.sendEmails || mode === 'DRY_RUN') {
+      const dry = {
+        ok: true,
+        status: 'DRY_RUN_VALIDATED',
+        runId: runId,
+        sourceRows: report.rows.length,
+        repCount: Object.keys(routing.groups).length,
+        ownerField: ownerField
+      };
+      console.log(JSON.stringify(dry));
+      return dry;
+    }
+
+    let adminTestEmail = '';
+    if (mode === 'TEST') adminTestEmail = obValidateSingleEmail_(control.ADMIN_TEST_EMAIL);
+    if (mode === 'PRODUCTION' && control.ENABLED !== true) {
+      throw new Error('Production send blocked because ENABLED is FALSE.');
+    }
+
+    const results = [];
+    const repKeys = Object.keys(routing.groups).sort();
+
+    // All routing validations above happen BEFORE this first send.
+    for (const repKey of repKeys) {
+      const group = routing.groups[repKey];
+      const rep = group.rep;
+      const rows = group.rows;
+
+      obAssertGroupIsolation_(rep, rows, ownerField);
+
+      const recipient = mode === 'TEST'
+        ? adminTestEmail
+        : obValidateSingleEmail_(rep.email);
+
+      const payloadHash = obHash_(JSON.stringify(rows));
+      const totalOpenBalance = rows.reduce((sum, row) => sum + obToNumber_(row.OpenBalance), 0);
+      const subjectDate = Utilities.formatDate(new Date(), String(control.TIMEZONE || 'America/Toronto'), 'yyyy-MM-dd');
+      const subject = mode === 'TEST'
+        ? '[TEST – Intended for ' + rep.name + '] Open Balance Report – ' + subjectDate
+        : 'Open Balance Report – ' + subjectDate;
+
+      const htmlBody = obBuildEmailHtml_(rep, rows, totalOpenBalance, mode, control.TIMEZONE || 'America/Toronto');
+      const textBody = obBuildEmailText_(rep, rows, totalOpenBalance, mode, control.TIMEZONE || 'America/Toronto');
+
+      try {
+        MailApp.sendEmail({
+          to: recipient,
+          subject: subject,
+          body: textBody,
+          htmlBody: htmlBody,
+          name: OB.SENDER_NAME
+        });
+
+        obAppendSendLog_(ss, [
+          runId, new Date(), mode, rep.key, rep.name, recipient,
+          rows.length, totalOpenBalance, payloadHash, 'SENT', ''
+        ]);
+        results.push({ repKey: rep.key, repName: rep.name, recipient: recipient, rowCount: rows.length, status: 'SENT' });
+      } catch (err) {
+        obAppendSendLog_(ss, [
+          runId, new Date(), mode, rep.key, rep.name, recipient,
+          rows.length, totalOpenBalance, payloadHash, 'FAILED', String(err && err.message ? err.message : err)
+        ]);
+        throw err;
+      }
+    }
+
+    obSetControlValue_(ss, 'STATUS', mode === 'PRODUCTION' ? 'LAST_RUN_SENT' : 'LAST_TEST_SENT');
+    return { ok: true, status: mode === 'PRODUCTION' ? 'SENT' : 'TEST_SENT', runId: runId, results: results };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function obFetchReport_() {
+  const url = PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY);
+  if (!url) {
+    throw new Error('Missing Script Property ' + OB.REPORT_URL_PROPERTY + '. Run openBalanceSetupReportUrl().');
+  }
+  if (!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(url)) {
+    throw new Error('Stored open-balance report URL is not an expected Striven v2 report URL.');
+  }
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: { Accept: 'application/json' }
+  });
+  const status = response.getResponseCode();
+  if (status < 200 || status >= 300) {
+    throw new Error('Striven report HTTP ' + status + ': ' + response.getContentText().slice(0, 500));
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(response.getContentText());
+  } catch (err) {
+    throw new Error('Striven report did not return valid JSON.');
+  }
+
+  if (!parsed || !Array.isArray(parsed.data)) {
+    throw new Error('Unexpected Striven report shape: expected an object with data[].');
+  }
+  if (parsed.nextPage) {
+    throw new Error('Report pagination is present but not yet explicitly validated. Privacy stop instead of guessing pagination semantics.');
+  }
+
+  const rows = parsed.data;
+  const fields = rows.length ? Object.keys(rows[0]) : [];
+  return { rows: rows, fields: fields, totalRecords: Number(parsed.totalRecords || rows.length) };
+}
+
+function obReadControl_(ss) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.CONTROL);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) throw new Error('OPEN_BALANCE_CONTROL has no settings.');
+  const values = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  const out = {};
+  values.forEach(row => {
+    const key = String(row[0] || '').trim();
+    if (key) out[key] = row[1];
+  });
+  return out;
+}
+
+function obSetControlValue_(ss, key, value) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.CONTROL);
+  const lastRow = sheet.getLastRow();
+  const keys = sheet.getRange(1, 1, Math.max(lastRow, 1), 1).getValues().flat();
+  const index = keys.findIndex(v => String(v || '').trim() === key);
+  if (index < 0) throw new Error('Control setting not found: ' + key);
+  sheet.getRange(index + 1, 2).setValue(value);
+}
+
+function obReadRepConfig_(ss, readyOnly) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.REPS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  const values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
+  const reps = [];
+  values.forEach((row, idx) => {
+    const enabled = row[0] === true;
+    if (!enabled) return;
+    const status = String(row[6] || '').trim().toUpperCase();
+    if (readyOnly && status !== 'READY') return;
+
+    const rep = {
+      rowNumber: idx + 2,
+      key: String(row[1] || '').trim(),
+      name: String(row[2] || '').trim(),
+      email: String(row[3] || '').trim(),
+      sourceOwnerValue: String(row[4] || '').trim(),
+      status: status,
+      notes: String(row[7] || '').trim()
+    };
+
+    if (!rep.key || !rep.name || !rep.email || !rep.sourceOwnerValue) {
+      throw new Error('Enabled rep config row ' + rep.rowNumber + ' is incomplete.');
+    }
+    obValidateSingleEmail_(rep.email);
+    reps.push(rep);
+  });
+  return reps;
+}
+
+function obBuildRepMap_(reps) {
+  const map = {};
+  const repKeys = new Set();
+  const emails = new Set();
+
+  reps.forEach(rep => {
+    const ownerKey = obNorm_(rep.sourceOwnerValue);
+    if (!ownerKey) throw new Error('Blank Source Owner Value for rep ' + rep.name + '.');
+    if (map[ownerKey]) throw new Error('Duplicate Source Owner Value in rep config: ' + rep.sourceOwnerValue);
+    if (repKeys.has(obNorm_(rep.key))) throw new Error('Duplicate Rep Key in rep config: ' + rep.key);
+    if (emails.has(rep.email.toLowerCase())) throw new Error('Duplicate production recipient email in rep config: ' + rep.email);
+    map[ownerKey] = rep;
+    repKeys.add(obNorm_(rep.key));
+    emails.add(rep.email.toLowerCase());
+  });
+
+  return map;
+}
+
+function obRouteRows_(sourceRows, ownerField, repByOwner, runId) {
+  const groups = {};
+  const stagingRows = [];
+  const exceptions = [];
+  let routedCount = 0;
+  const fetchedAt = new Date();
+
+  sourceRows.forEach(row => {
+    const ownerRaw = row[ownerField];
+    const ownerNormalized = obNorm_(ownerRaw);
+    const rep = ownerNormalized ? repByOwner[ownerNormalized] : null;
+    const hash = obHash_(JSON.stringify(row));
+
+    if (!ownerNormalized) {
+      exceptions.push(obExceptionRow_(runId, row, 'MISSING_OWNER', 'Owner field ' + ownerField + ' is blank.'));
+      stagingRows.push(obStagingRow_(runId, fetchedAt, '', row, 'BLOCKED_MISSING_OWNER', hash));
+      return;
+    }
+    if (!rep) {
+      exceptions.push(obExceptionRow_(runId, row, 'OWNER_NOT_CONFIGURED', 'No enabled READY rep config matches owner value: ' + ownerRaw));
+      stagingRows.push(obStagingRow_(runId, fetchedAt, '', row, 'BLOCKED_OWNER_NOT_CONFIGURED', hash));
+      return;
+    }
+
+    if (!groups[rep.key]) groups[rep.key] = { rep: rep, rows: [] };
+    groups[rep.key].rows.push(row);
+    stagingRows.push(obStagingRow_(runId, fetchedAt, rep.key, row, 'ROUTED', hash));
+    routedCount++;
+  });
+
+  return { groups: groups, stagingRows: stagingRows, exceptions: exceptions, routedCount: routedCount };
+}
+
+function obAssertGroupIsolation_(rep, rows, ownerField) {
+  if (!rows.length) throw new Error('Refusing to send empty group for ' + rep.name + '.');
+  const expected = obNorm_(rep.sourceOwnerValue);
+  for (const row of rows) {
+    const actual = obNorm_(row[ownerField]);
+    if (actual !== expected) {
+      throw new Error('Privacy invariant failed for ' + rep.name + ': row owner ' + row[ownerField] + ' does not equal configured owner ' + rep.sourceOwnerValue + '.');
+    }
+  }
+}
+
+function obReplaceStaging_(ss, rows) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.DATA);
+  const maxRows = sheet.getMaxRows();
+  if (maxRows > 1) sheet.getRange(2, 1, maxRows - 1, 15).clearContent();
+  if (!rows.length) return;
+  obEnsureRows_(sheet, rows.length + 1);
+  sheet.getRange(2, 1, rows.length, 15).setValues(rows);
+}
+
+function obAppendException_(ss, row) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.EXCEPTIONS);
+  sheet.appendRow(row);
+}
+
+function obAppendSendLog_(ss, row) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.SEND_LOG);
+  sheet.appendRow(row);
+}
+
+function obStagingRow_(runId, fetchedAt, repKey, row, routingStatus, hash) {
+  return [
+    runId,
+    fetchedAt,
+    repKey,
+    row.CustomerNumber == null ? '' : String(row.CustomerNumber),
+    row.CustomerName == null ? '' : String(row.CustomerName),
+    row.TransactionType == null ? '' : String(row.TransactionType),
+    row.TransactionNumber == null ? '' : String(row.TransactionNumber),
+    obToNumber_(row.TransactionAmount),
+    row.TransactionDate == null ? '' : String(row.TransactionDate),
+    obToNumber_(row.OpenBalance),
+    row.CreatedBy == null ? '' : String(row.CreatedBy),
+    row.CreatedOn == null ? '' : String(row.CreatedOn),
+    row.TransactionMemo == null ? '' : String(row.TransactionMemo),
+    routingStatus,
+    hash
+  ];
+}
+
+function obExceptionRow_(runId, row, reason, details) {
+  return [
+    runId,
+    new Date(),
+    reason,
+    row.CustomerNumber == null ? '' : String(row.CustomerNumber),
+    row.CustomerName == null ? '' : String(row.CustomerName),
+    row.TransactionType == null ? '' : String(row.TransactionType),
+    row.TransactionNumber == null ? '' : String(row.TransactionNumber),
+    row.CreatedBy == null ? '' : String(row.CreatedBy),
+    obToNumber_(row.OpenBalance),
+    details,
+    'BLOCKED'
+  ];
+}
+
+function obBuildEmailHtml_(rep, rows, total, mode, timezone) {
+  const now = Utilities.formatDate(new Date(), String(timezone), 'yyyy-MM-dd h:mm a z');
+  const sorted = rows.slice().sort((a, b) => {
+    const an = String(a.CustomerName || '').toLowerCase();
+    const bn = String(b.CustomerName || '').toLowerCase();
+    if (an !== bn) return an.localeCompare(bn);
+    return String(a.TransactionDate || '').localeCompare(String(b.TransactionDate || ''));
+  });
+
+  const banner = mode === 'TEST'
+    ? '<div style="padding:10px 12px;background:#f2f2f2;border:1px solid #d7d7d7;margin-bottom:16px;"><strong>TEST MODE</strong> — Intended for ' + obHtml_(rep.name) + '. This message was sent only to the configured admin test recipient.</div>'
+    : '';
+
+  const bodyRows = sorted.map(row => '<tr>' +
+    '<td>' + obHtml_(row.CustomerNumber) + '</td>' +
+    '<td>' + obHtml_(row.CustomerName) + '</td>' +
+    '<td>' + obHtml_(row.TransactionType) + '</td>' +
+    '<td>' + obHtml_(row.TransactionNumber) + '</td>' +
+    '<td>' + obHtml_(row.TransactionDate) + '</td>' +
+    '<td style="text-align:right;white-space:nowrap;">' + obMoney_(row.TransactionAmount) + '</td>' +
+    '<td style="text-align:right;white-space:nowrap;font-weight:600;">' + obMoney_(row.OpenBalance) + '</td>' +
+    '<td>' + obHtml_(row.TransactionMemo) + '</td>' +
+  '</tr>').join('');
+
+  return '<div style="font-family:Arial,sans-serif;color:#222;line-height:1.4;">' +
+    banner +
+    '<h2 style="margin:0 0 6px;">Open Balance Report</h2>' +
+    '<div style="margin-bottom:14px;"><strong>Sales Rep:</strong> ' + obHtml_(rep.name) + '<br>' +
+    '<strong>Generated:</strong> ' + obHtml_(now) + '<br>' +
+    '<strong>Rows:</strong> ' + rows.length + '<br>' +
+    '<strong>Total Open Balance:</strong> ' + obMoney_(total) + '</div>' +
+    '<table style="border-collapse:collapse;width:100%;font-size:12px;">' +
+      '<thead><tr>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Customer #</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Customer</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Type</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Transaction #</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Date</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:right;">Amount</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:right;">Open Balance</th>' +
+        '<th style="border:1px solid #ddd;padding:6px;text-align:left;">Memo</th>' +
+      '</tr></thead>' +
+      '<tbody>' + bodyRows + '</tbody>' +
+    '</table>' +
+    '<p style="margin-top:16px;color:#666;font-size:11px;">This report is automatically generated from the Striven Central Data Hub. It contains only rows assigned to the named sales rep by the configured authoritative owner field.</p>' +
+  '</div>';
+}
+
+function obBuildEmailText_(rep, rows, total, mode, timezone) {
+  const now = Utilities.formatDate(new Date(), String(timezone), 'yyyy-MM-dd h:mm a z');
+  const prefix = mode === 'TEST' ? 'TEST MODE — Intended for ' + rep.name + '\n\n' : '';
+  const lines = rows.map(row => [
+    row.CustomerNumber || '', row.CustomerName || '', row.TransactionType || '',
+    row.TransactionNumber || '', row.TransactionDate || '',
+    obMoney_(row.TransactionAmount), obMoney_(row.OpenBalance), row.TransactionMemo || ''
+  ].join(' | '));
+
+  return prefix +
+    'Open Balance Report\n' +
+    'Sales Rep: ' + rep.name + '\n' +
+    'Generated: ' + now + '\n' +
+    'Rows: ' + rows.length + '\n' +
+    'Total Open Balance: ' + obMoney_(total) + '\n\n' +
+    lines.join('\n');
+}
+
+function obCheckConfigurationReadiness_(ss, control) {
+  if (control.OWNER_FIELD_PRESENT !== true) return { ready: false, reason: 'OWNER_FIELD_PRESENT is FALSE.' };
+  const reps = obReadRepConfig_(ss, true);
+  if (!reps.length) return { ready: false, reason: 'No enabled READY reps are configured.' };
+  obBuildRepMap_(reps);
+  if (!PropertiesService.getScriptProperties().getProperty(OB.REPORT_URL_PROPERTY)) {
+    return { ready: false, reason: 'Striven report URL Script Property is missing.' };
+  }
+  return { ready: true };
+}
+
+function obDeleteDistributionTriggers_() {
+  let count = 0;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === OB.TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+      count++;
+    }
+  });
+  return count;
+}
+
+function obFindField_(fields, requested) {
+  const target = obFieldNorm_(requested);
+  return fields.find(f => obFieldNorm_(f) === target) || null;
+}
+
+function obFieldNorm_(value) {
+  return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function obNorm_(value) {
+  return String(value == null ? '' : value).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function obToNumber_(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function obHash_(text) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(text), Utilities.Charset.UTF_8);
+  return Utilities.base64EncodeWebSafe(digest).replace(/=+$/g, '');
+}
+
+function obValidateSingleEmail_(value) {
+  const email = String(value || '').trim();
+  if (!email) throw new Error('Email is required.');
+  if (/[;,\s].*@|[,;]/.test(email) || !/^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/.test(email)) {
+    throw new Error('Exactly one valid email address is required: ' + email);
+  }
+  return email;
+}
+
+function obRequireSheet_(ss, name) {
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) throw new Error('Required sheet not found: ' + name);
+  return sheet;
+}
+
+function obEnsureRows_(sheet, requiredRows) {
+  const current = sheet.getMaxRows();
+  if (requiredRows > current) sheet.insertRowsAfter(current, requiredRows - current);
+}
+
+function obMoney_(value) {
+  const n = obToNumber_(value);
+  return n.toLocaleString('en-CA', { style: 'currency', currency: OB.CURRENCY });
+}
+
+function obHtml_(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
