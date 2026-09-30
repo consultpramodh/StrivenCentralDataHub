@@ -20,9 +20,20 @@ const OB = Object.freeze({
     REPS: 'OPEN_BALANCE_REP_CONFIG',
     DATA: 'DATA_OPEN_BALANCES',
     SEND_LOG: 'OPEN_BALANCE_SEND_LOG',
-    EXCEPTIONS: 'OPEN_BALANCE_EXCEPTIONS'
+    EXCEPTIONS: 'OPEN_BALANCE_EXCEPTIONS',
+    EMPLOYEE_PROFILES: 'DATA_EMPLOYEE_PROFILES'
   }),
   REPORT_URL_PROPERTY: 'STRIVEN_OPEN_BALANCE_REPORT_URL',
+  DIRECT_API: Object.freeze({
+    BASE_URL: 'https://api.striven.com',
+    INVOICE_SEARCH_PATH: '/v1/invoices/search',
+    INVOICE_DETAIL_PREFIX: '/v1/invoices/',
+    EMPLOYEE_DETAIL_PREFIX: '/v1/employees/',
+    SEARCH_PAGE_SIZE: 100,
+    SEARCH_MAX_PAGES: 500,
+    SEARCH_TIME_BUDGET_MS: 4 * 60 * 1000,
+    API_BRAKE_MS: 750
+  }),
   TRIGGER_FUNCTION: 'runOpenBalanceRepDistribution',
   REFRESH_TRIGGER_FUNCTION: 'runOpenBalanceAutoRefresh',
   PRIVATE_CONFIG_SHEET: 'OPEN_BALANCE_PRIVATE_CONFIG',
@@ -64,9 +75,6 @@ function runOpenBalanceAutoRefresh() {
     obWriteRawSnapshot_(ss, report.rows, ownerField);
     obRecordRefresh_(ss, report.rows.length, 'SUCCESS');
 
-    obWriteRawSnapshot_(ss, report.rows, ownerField);
-    obRecordRefresh_(ss, report.rows.length, 'SUCCESS');
-
     obSetControlValue_(ss, 'OWNER_FIELD_PRESENT', !!ownerField);
     obSetControlValue_(
       ss,
@@ -88,6 +96,135 @@ function runOpenBalanceAutoRefresh() {
       obRecordRefresh_(ss, '', 'FAILED: ' + String(err && err.message ? err.message : err).slice(0, 500));
     } catch (loggingErr) {}
     throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Resolves authoritative ownership for every Open Balance Invoice through
+ * Striven's direct Invoice API.
+ *
+ * Route:
+ *   Transaction Number
+ *     -> POST /v1/invoices/search
+ *     -> unique Invoice ID
+ *     -> GET /v1/invoices/{id}
+ *     -> invoice.salesRep.id/name
+ *     -> one-time GET /v1/employees/{salesRep.id} cache
+ *
+ * Safety:
+ * - Never substitutes CreatedBy.
+ * - Never guesses duplicate/missing Invoice IDs.
+ * - Payment rows remain blocked until payment-to-invoice application evidence
+ *   is implemented and verified.
+ * - Sends no email.
+ */
+function openBalanceResolveInvoiceOwners() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    const ss = SpreadsheetApp.openById(OB.SPREADSHEET_ID);
+    const report = obFetchReport_();
+    const invoiceRows = report.rows.filter(function(row) {
+      return String(row.TransactionType || '').trim().toUpperCase() === 'INVOICE';
+    });
+
+    if (!invoiceRows.length) {
+      throw new Error('Open Balance report returned zero Invoice rows.');
+    }
+
+    const resolution = obResolveInvoiceOwnersFromDirectApi_(invoiceRows);
+    const fetchedAt = new Date();
+    const runId = 'OWNER-' + Utilities.formatDate(
+      fetchedAt,
+      Session.getScriptTimeZone() || 'America/Toronto',
+      'yyyyMMdd-HHmmss'
+    );
+
+    const employeeIds = [];
+    const stagingRows = report.rows.map(function(row) {
+      const type = String(row.TransactionType || '').trim().toUpperCase();
+      const hash = obHash_(JSON.stringify(row));
+
+      if (type !== 'INVOICE') {
+        return obStagingRow_(
+          runId,
+          fetchedAt,
+          '',
+          row,
+          type === 'PAYMENT'
+            ? 'PENDING_PAYMENT_APPLICATION_OWNER'
+            : 'BLOCKED_UNSUPPORTED_TRANSACTION_TYPE',
+          hash
+        );
+      }
+
+      const comparable = obNormalizeTransactionNumber_(row.TransactionNumber);
+      const resolved = resolution.byTransaction[comparable];
+
+      if (!resolved || resolved.status !== 'VERIFIED') {
+        return obStagingRow_(
+          runId,
+          fetchedAt,
+          '',
+          row,
+          resolved ? resolved.status : 'BLOCKED_INVOICE_NOT_RESOLVED',
+          hash
+        );
+      }
+
+      const employeeId = String(resolved.salesRepId);
+      if (employeeIds.indexOf(employeeId) === -1) employeeIds.push(employeeId);
+
+      return obStagingRow_(
+        runId,
+        fetchedAt,
+        employeeId,
+        row,
+        'VERIFIED_INVOICE_SALES_REP_API',
+        hash
+      );
+    });
+
+    obReplaceStaging_(ss, stagingRows);
+
+    const profiles = obCacheEmployeeProfiles_(ss, employeeIds, resolution);
+    const verifiedCount = Object.keys(resolution.byTransaction).filter(function(key) {
+      return resolution.byTransaction[key].status === 'VERIFIED';
+    }).length;
+
+    obSetControlValue_(ss, 'INVOICE_OWNERS_VERIFIED', verifiedCount);
+    obSetControlValue_(
+      ss,
+      'STATUS',
+      verifiedCount === invoiceRows.length
+        ? 'INVOICE_OWNER_ENRICHMENT_COMPLETE'
+        : 'OWNER_ENRICHMENT_PARTIAL'
+    );
+
+    const result = {
+      ok: verifiedCount === invoiceRows.length,
+      status: verifiedCount === invoiceRows.length
+        ? 'INVOICE_OWNER_ENRICHMENT_COMPLETE'
+        : 'OWNER_ENRICHMENT_PARTIAL',
+      sourceRows: report.rows.length,
+      invoiceRows: invoiceRows.length,
+      verifiedInvoiceOwners: verifiedCount,
+      unresolvedInvoiceOwners: invoiceRows.length - verifiedCount,
+      paymentRows: report.rows.filter(function(row) {
+        return String(row.TransactionType || '').trim().toUpperCase() === 'PAYMENT';
+      }).length,
+      invoiceSearchPages: resolution.pagesFetched,
+      apiCalls: resolution.apiCalls + profiles.apiCalls,
+      employeeProfilesRequested: profiles.requested,
+      employeeProfilesVerified: profiles.verified,
+      employeeProfilesWithoutEmail: profiles.withoutEmail
+    };
+
+    console.log(JSON.stringify(result));
+    return result;
   } finally {
     lock.releaseLock();
   }
@@ -422,6 +559,496 @@ function obRun_(options) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function obResolveInvoiceOwnersFromDirectApi_(invoiceRows) {
+  const targetNumbers = [];
+  const targetIndex = Object.create(null);
+
+  invoiceRows.forEach(function(row) {
+    const raw = String(row.TransactionNumber || '').trim();
+    const comparable = obNormalizeTransactionNumber_(raw);
+    if (!comparable) return;
+    if (!targetIndex[comparable]) {
+      targetIndex[comparable] = raw;
+      targetNumbers.push(raw);
+    }
+  });
+
+  const matches = Object.create(null);
+  const startedAt = Date.now();
+  let pageIndex = 0;
+  let pagesFetched = 0;
+  let apiCalls = 0;
+
+  while (
+    pageIndex < OB.DIRECT_API.SEARCH_MAX_PAGES &&
+    Date.now() - startedAt < OB.DIRECT_API.SEARCH_TIME_BUDGET_MS
+  ) {
+    const response = obStrivenApiRequest_({
+      path: OB.DIRECT_API.INVOICE_SEARCH_PATH,
+      method: 'post',
+      payload: {
+        PageIndex: pageIndex,
+        PageSize: OB.DIRECT_API.SEARCH_PAGE_SIZE
+      }
+    });
+    apiCalls++;
+
+    const page = obExtractInvoiceSearchPage_(response.data);
+    pagesFetched++;
+
+    page.records.forEach(function(record) {
+      const transactionNumber = String(
+        record.txnNumber ||
+        record.transactionNumber ||
+        record.invoiceNumber ||
+        ''
+      ).trim();
+      const comparable = obNormalizeTransactionNumber_(transactionNumber);
+      if (!targetIndex[comparable]) return;
+
+      const invoiceId = String(
+        record.id ||
+        record.invoiceId ||
+        record.InvoiceID ||
+        ''
+      ).trim();
+      if (!/^\d+$/.test(invoiceId)) return;
+
+      if (!matches[comparable]) matches[comparable] = [];
+      if (matches[comparable].indexOf(invoiceId) === -1) {
+        matches[comparable].push(invoiceId);
+      }
+    });
+
+    const allTargetsSeen = targetNumbers.every(function(number) {
+      return !!matches[obNormalizeTransactionNumber_(number)];
+    });
+
+    if (allTargetsSeen || page.isLastPage || !page.records.length) break;
+    pageIndex++;
+  }
+
+  const byTransaction = Object.create(null);
+
+  targetNumbers.forEach(function(number) {
+    const comparable = obNormalizeTransactionNumber_(number);
+    const ids = matches[comparable] || [];
+
+    if (!ids.length) {
+      byTransaction[comparable] = {
+        status: 'BLOCKED_INVOICE_ID_NOT_FOUND',
+        transactionNumber: number
+      };
+      return;
+    }
+    if (ids.length !== 1) {
+      byTransaction[comparable] = {
+        status: 'BLOCKED_AMBIGUOUS_INVOICE_ID',
+        transactionNumber: number,
+        candidateCount: ids.length
+      };
+      return;
+    }
+
+    const invoiceId = ids[0];
+    const detailResponse = obStrivenApiRequest_({
+      path: OB.DIRECT_API.INVOICE_DETAIL_PREFIX + encodeURIComponent(invoiceId),
+      method: 'get'
+    });
+    apiCalls++;
+
+    const detail = detailResponse.data;
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail)) {
+      byTransaction[comparable] = {
+        status: 'BLOCKED_INVALID_INVOICE_DETAIL',
+        transactionNumber: number,
+        invoiceId: invoiceId
+      };
+      return;
+    }
+
+    const detailNumber = String(
+      detail.txnNumber ||
+      detail.transactionNumber ||
+      detail.invoiceNumber ||
+      ''
+    ).trim();
+
+    if (obNormalizeTransactionNumber_(detailNumber) !== comparable) {
+      byTransaction[comparable] = {
+        status: 'BLOCKED_INVOICE_NUMBER_MISMATCH',
+        transactionNumber: number,
+        invoiceId: invoiceId
+      };
+      return;
+    }
+
+    const salesRep = detail.salesRep;
+    const salesRepId = salesRep && String(salesRep.id || '').trim();
+    const salesRepName = salesRep && String(salesRep.name || '').trim();
+
+    if (!salesRepId || !/^\d+$/.test(salesRepId) || !salesRepName) {
+      byTransaction[comparable] = {
+        status: 'BLOCKED_INVOICE_SALES_REP_MISSING',
+        transactionNumber: number,
+        invoiceId: invoiceId
+      };
+      return;
+    }
+
+    byTransaction[comparable] = {
+      status: 'VERIFIED',
+      transactionNumber: number,
+      invoiceId: invoiceId,
+      salesRepId: salesRepId,
+      salesRepName: salesRepName
+    };
+  });
+
+  return {
+    byTransaction: byTransaction,
+    targetCount: targetNumbers.length,
+    pagesFetched: pagesFetched,
+    apiCalls: apiCalls
+  };
+}
+
+function obExtractInvoiceSearchPage_(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Invoice search returned an unsupported payload.');
+  }
+
+  const records = Array.isArray(payload)
+    ? payload
+    : (
+        Array.isArray(payload.data)
+          ? payload.data
+          : (
+              Array.isArray(payload.results)
+                ? payload.results
+                : (
+                    Array.isArray(payload.items)
+                      ? payload.items
+                      : []
+                  )
+            )
+      );
+
+  const totalCount = Number(
+    payload.totalCount ||
+    payload.TotalCount ||
+    payload.totalRecords ||
+    payload.TotalRecords ||
+    payload.count ||
+    0
+  );
+  const pageIndex = Number(payload.pageIndex || payload.PageIndex || 0);
+  const pageSize = Number(
+    payload.pageSize ||
+    payload.PageSize ||
+    OB.DIRECT_API.SEARCH_PAGE_SIZE
+  );
+
+  return {
+    records: records,
+    isLastPage: totalCount > 0 && pageSize > 0
+      ? ((pageIndex + 1) * pageSize >= totalCount)
+      : records.length < pageSize
+  };
+}
+
+function obStrivenApiRequest_(request, retrying) {
+  request = request || {};
+  const path = String(request.path || '');
+  if (!/^\/v1\//.test(path)) {
+    throw new Error('Refusing unapproved Striven API path: ' + path);
+  }
+
+  const token = obGetStrivenAccessToken_(!!retrying);
+  Utilities.sleep(OB.DIRECT_API.API_BRAKE_MS);
+
+  const options = {
+    method: String(request.method || 'get').toLowerCase(),
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  };
+
+  if (request.payload !== undefined) {
+    options.contentType = 'application/json';
+    options.payload = JSON.stringify(request.payload);
+  }
+
+  const response = UrlFetchApp.fetch(OB.DIRECT_API.BASE_URL + path, options);
+  const status = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (status === 401 && !retrying) {
+    obClearStrivenTokenCache_();
+    return obStrivenApiRequest_(request, true);
+  }
+
+  if (status < 200 || status >= 300) {
+    throw new Error(
+      'Striven API HTTP ' + status + ' for ' + path +
+      ': ' + String(text || '').slice(0, 500)
+    );
+  }
+
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      throw new Error('Striven API returned non-JSON content for ' + path + '.');
+    }
+  }
+
+  return { statusCode: status, data: data };
+}
+
+function obGetStrivenAccessToken_(forceRefresh) {
+  const props = PropertiesService.getScriptProperties();
+  const tokenKey = 'OB_STRIVEN_ACCESS_TOKEN';
+  const expiryKey = 'OB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS';
+  const now = Date.now();
+
+  if (!forceRefresh) {
+    const cached = String(props.getProperty(tokenKey) || '');
+    const expiry = Number(props.getProperty(expiryKey) || 0);
+    if (cached && expiry > now + 5 * 60 * 1000) return cached;
+  }
+
+  const clientId = String(
+    props.getProperty('CLIENT_ID') ||
+    props.getProperty('STRIVEN_CLIENT_ID') ||
+    ''
+  ).trim();
+  const clientSecret = String(
+    props.getProperty('CLIENT_SECRET') ||
+    props.getProperty('STRIVEN_CLIENT_SECRET') ||
+    ''
+  ).trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      'Missing Striven OAuth credentials. Expected CLIENT_ID/CLIENT_SECRET ' +
+      'or STRIVEN_CLIENT_ID/STRIVEN_CLIENT_SECRET in Script Properties.'
+    );
+  }
+
+  const basic = Utilities.base64Encode(clientId + ':' + clientSecret);
+  const response = UrlFetchApp.fetch(OB.DIRECT_API.BASE_URL + '/accesstoken', {
+    method: 'post',
+    headers: {
+      Authorization: 'Basic ' + basic,
+      Accept: 'application/json'
+    },
+    payload: {
+      grant_type: 'client_credentials',
+      ClientId: clientId
+    },
+    muteHttpExceptions: true
+  });
+
+  const status = response.getResponseCode();
+  const text = response.getContentText();
+  if (status < 200 || status >= 300) {
+    throw new Error('Striven OAuth failed HTTP ' + status + '.');
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error('Striven OAuth returned non-JSON content.');
+  }
+
+  if (!parsed || !parsed.access_token) {
+    throw new Error('Striven OAuth response did not contain access_token.');
+  }
+
+  const expiresIn = Number(parsed.expires_in);
+  if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error('Striven OAuth response did not contain a valid expires_in.');
+  }
+
+  props.setProperties({
+    [tokenKey]: String(parsed.access_token),
+    [expiryKey]: String(now + expiresIn * 1000)
+  }, false);
+
+  return String(parsed.access_token);
+}
+
+function obClearStrivenTokenCache_() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty('OB_STRIVEN_ACCESS_TOKEN');
+  props.deleteProperty('OB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+}
+
+function obNormalizeTransactionNumber_(value) {
+  return String(value == null ? '' : value)
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+}
+
+function obCacheEmployeeProfiles_(ss, employeeIds, resolution) {
+  const sheet = obRequireSheet_(ss, OB.SHEETS.EMPLOYEE_PROFILES);
+  const lastRow = sheet.getLastRow();
+  const existing = lastRow >= 2
+    ? sheet.getRange(2, 1, lastRow - 1, 14).getValues()
+    : [];
+
+  const rowById = Object.create(null);
+  const rowsByName = Object.create(null);
+
+  existing.forEach(function(row, index) {
+    const sheetRow = index + 2;
+    const id = String(row[0] || '').trim();
+    const name = obNorm_(row[2]);
+    if (id) rowById[id] = sheetRow;
+    if (name) {
+      if (!rowsByName[name]) rowsByName[name] = [];
+      rowsByName[name].push(sheetRow);
+    }
+  });
+
+  const repNameById = Object.create(null);
+  Object.keys(resolution.byTransaction).forEach(function(key) {
+    const item = resolution.byTransaction[key];
+    if (item.status === 'VERIFIED') {
+      repNameById[String(item.salesRepId)] = item.salesRepName;
+    }
+  });
+
+  let apiCalls = 0;
+  let verified = 0;
+  let withoutEmail = 0;
+
+  employeeIds.forEach(function(employeeId) {
+    const id = String(employeeId || '').trim();
+    if (!/^\d+$/.test(id)) return;
+
+    const existingRowNumber = rowById[id];
+    if (existingRowNumber) {
+      const existingStatus = String(
+        sheet.getRange(existingRowNumber, 13).getValue() || ''
+      ).toUpperCase();
+      if (existingStatus === 'VERIFIED') {
+        verified++;
+        return;
+      }
+    }
+
+    const response = obStrivenApiRequest_({
+      path: OB.DIRECT_API.EMPLOYEE_DETAIL_PREFIX + encodeURIComponent(id),
+      method: 'get'
+    });
+    apiCalls++;
+
+    const employee = response.data;
+    if (!employee || typeof employee !== 'object' || Array.isArray(employee)) {
+      throw new Error('Employee ' + id + ' returned an invalid profile payload.');
+    }
+    if (String(employee.Id || employee.id || '').trim() !== id) {
+      throw new Error('Employee profile ID mismatch for ' + id + '.');
+    }
+
+    const fullName = obEmployeeFullName_(employee) || repNameById[id] || '';
+    const primaryEmail = obEmployeePrimaryEmail_(employee);
+    const manager = employee.Manager || employee.manager || {};
+    const division = employee.Division || employee.division || {};
+    const location = employee.Location || employee.location || {};
+    const jobTitle = employee.JobTitle || employee.jobTitle || {};
+
+    let targetRow = rowById[id] || 0;
+    if (!targetRow && fullName) {
+      const candidates = rowsByName[obNorm_(fullName)] || [];
+      if (candidates.length === 1) targetRow = candidates[0];
+    }
+    if (!targetRow) {
+      sheet.insertRowAfter(Math.max(sheet.getLastRow(), 1));
+      targetRow = sheet.getLastRow();
+    }
+
+    const profileStatus = primaryEmail ? 'VERIFIED' : 'VERIFIED_NO_EMAIL';
+    if (!primaryEmail) withoutEmail++;
+
+    sheet.getRange(targetRow, 1, 1, 14).setValues([[
+      id,
+      employee.EmployeeNumber == null ? '' : String(employee.EmployeeNumber),
+      fullName,
+      primaryEmail,
+      employee.Status === true,
+      employee.SystemUser === true,
+      division.Name || division.name || '',
+      location.Name || location.name || '',
+      jobTitle.Name || jobTitle.name || '',
+      manager.Id || manager.id || '',
+      manager.Name || manager.name || '',
+      'GET /v1/employees/' + id,
+      profileStatus,
+      new Date()
+    ]]);
+
+    rowById[id] = targetRow;
+    if (profileStatus === 'VERIFIED') verified++;
+  });
+
+  return {
+    requested: employeeIds.length,
+    verified: verified,
+    withoutEmail: withoutEmail,
+    apiCalls: apiCalls
+  };
+}
+
+function obEmployeeFullName_(employee) {
+  return [
+    employee.Prefix,
+    employee.Firstname,
+    employee.MiddleName,
+    employee.Lastname,
+    employee.Suffix
+  ].map(function(value) {
+    return String(value || '').trim();
+  }).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function obEmployeePrimaryEmail_(employee) {
+  const emails = Array.isArray(employee.Emails)
+    ? employee.Emails
+    : (Array.isArray(employee.emails) ? employee.emails : []);
+
+  const usable = emails.filter(function(item) {
+    return item && String(item.Email || item.email || '').trim();
+  });
+
+  const ordered = [
+    usable.filter(function(item) {
+      return item.Active === true && item.IsPrimary === true;
+    }),
+    usable.filter(function(item) {
+      return item.IsPrimary === true;
+    }),
+    usable.filter(function(item) {
+      return item.Active === true;
+    }),
+    usable
+  ];
+
+  for (let i = 0; i < ordered.length; i++) {
+    if (ordered[i].length) {
+      return String(ordered[i][0].Email || ordered[i][0].email || '').trim();
+    }
+  }
+  return '';
 }
 
 function obFetchReport_() {
