@@ -28,9 +28,11 @@ jobs:
           chmod 600 "$HOME/.clasprc.json"
       - name: Run probe
         run: |
+          set -euo pipefail
           SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
           mkdir -p RUN
           cat > RUN/.clasp.json <<EOF
           {"scriptId":"$SCRIPT_ID"}
           EOF
-          clasp run hub_probeTransactionEndpoints --project RUN --deploymentId AKfycbyZiJ_vm6MxSCYIDWJ2KeY8fpykzP0GjwtwMcL1eSPzzSkcH0eOQNmJtTQ1f6qEiVY8
+          clasp run-function hub_probeTransactionEndpoints --project RUN --json > result.json
+          node -e 'const r=require("./result.json"); if(r.error || !r.response || r.response.status !== "PASS") { console.error("Probe failed:", JSON.stringify(r)); process.exit(1); } console.log(JSON.stringify(r.response));'
