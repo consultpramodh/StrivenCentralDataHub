@@ -3290,10 +3290,11 @@ function hub_refreshPoAnalysis() {
     hub_poTable_(ss,'PO_TRANSACTION_AUDIT',result.audit);
     hub_poTable_(ss,'PO_RETURN_REVIEW',result.review);
     hub_poTable_(ss,'PO_SKU_REVIEW',result.aliases);
+    hub_poTable_(ss,'PO_ITEM_IDENTITY_REVIEW',result.identityReview);
     SpreadsheetApp.flush();
     if(ss.getSheetByName('PO_API_SALES_LINES').getLastRow()-1!==sales.length||ss.getSheetByName('PO_SALES_SUMMARY').getLastRow()-1!==current.length)throw new Error('Published row count mismatch.');
-    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,aliasReviewRows:result.aliases.slice(1).filter(r=>String(r[5]).indexOf('REVIEW:')===0).length,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
-    hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','PASS_WITH_EXCEPTIONS',snap],['Sales through',through,'Actual transactions only; no Jul-Dec forecast'],['API sales import','PASS',sales.length+' unique rows; pagination exhausted and counts reconciled'],['API PO import','PASS',pos.length+' unique rows'],['Selected PO scope','PASS',detail.length+' lines; '+current.length+' Item IDs; '+out.ordered+' ordered'],['Inventory','PASS',invRows[1][13]],['Returns','REVIEW',out.returnReviewLines+' lines; physical returns unknown unless explicitly classified'],['SKU aliases','REVIEW',out.aliasReviewRows+' pending relationships; no unproven consolidation'],['Attribution','PRODUCT POPULATION','Sales for listed products; no physical PO-lot attribution'],['Schedule','MANUAL','Central Hub > Refresh Complete PO Analysis'],['Safety','PASS','No Striven writes; prior sales retained on source validation failures']]);
+    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,identityReviewLines:result.identityReview.length-1,aliasReviewRows:result.aliases.slice(1).filter(r=>String(r[5]).indexOf('REVIEW:')===0).length,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
+    hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','PASS_WITH_EXCEPTIONS',snap],['Sales through',through,'Actual transactions only; no Jul-Dec forecast'],['API sales import','PASS',sales.length+' unique rows; pagination exhausted and counts reconciled'],['API PO import','PASS',pos.length+' unique rows'],['Selected PO scope','PASS',detail.length+' lines; '+current.length+' Item IDs; '+out.ordered+' ordered'],['Inventory','PASS',invRows[1][13]],['Returns','REVIEW',out.returnReviewLines+' lines; physical returns unknown unless explicitly classified'],['SKU aliases','REVIEW',out.aliasReviewRows+' pending relationships; no unproven consolidation'],['Product identity','REVIEW',out.identityReviewLines+' unresolved sales lines; generic placeholders excluded from product totals'],['Attribution','PRODUCT POPULATION','Sales for listed products; no physical PO-lot attribution'],['Schedule','MANUAL','Central Hub > Refresh Complete PO Analysis'],['Safety','PASS','No Striven writes; prior sales retained on source validation failures']]);
     Logger.log(JSON.stringify(out));return out;
   }catch(e){hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','FAILED',snap],['Reason','ACTION REQUIRED',String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]')],['Results','STALE','Last successful outputs retained where available; do not treat as a successful refresh']]);throw new Error(String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]'));}finally{guard.releaseLock();}
 }
@@ -3318,7 +3319,7 @@ function hub_poDate_(v){const m=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(v));if
 function hub_poCompute_(sales,scope,iv,through){
  const header=['Line ID','Transaction ID','Transaction number','Date','Type','Status','Nonposting','Item ID','SKU','Item name','Description','Qty','Amount CAD','Inventory location','Decision'];
  const approved=hub_poApprovedAliases_();
- const audit=[header.concat(['Canonical Item ID','Match method'])],review=[header.concat(['Canonical Item ID','Match method'])],a={},gross=[0,0],aliases=[['Scoped Item ID','Scoped SKU','Candidate Item ID','Candidate SKU','Reason','Decision']],aliasSeen={};
+ const audit=[header.concat(['Canonical Item ID','Match method'])],review=[header.concat(['Canonical Item ID','Match method'])],identityReview=[header.concat(['Canonical Item ID','Match method'])],a={},gross=[0,0],aliases=[['Scoped Item ID','Scoped SKU','Candidate Item ID','Candidate SKU','Reason','Decision']],aliasSeen={};
  Object.keys(scope).forEach(id=>a[id]=[0,0,0,0,0,0]);
  Object.keys(approved).forEach(id=>{const d=approved[id];if(scope[d.canonical])aliases.push([Number(d.canonical),scope[d.canonical][1],Number(id),d.sku+' - INACTIVE',d.evidence,'APPROVED: same UPC']);});
  // Keep possible equivalent Item IDs visible even when both IDs are directly on the selected POs.
@@ -3333,13 +3334,13 @@ function hub_poCompute_(sales,scope,iv,through){
  if(!scope[id]){const sku=String(r.ItemNumber||'').replace(/\s*-\s*INACTIVE$/i,'');Object.values(scope).forEach(s=>{if(sku&&(sku===s[1]||sku.replace(/H$/,'')===s[1].replace(/H$/,'')||sku.replace(/M$/,'')===s[1].replace(/M$/,''))){const k=s[0]+'|'+id;if(!aliasSeen[k]){aliases.push([s[0],s[1],Number(id),r.ItemNumber,'SKU variant / duplicate candidate','REVIEW: identity must be evidenced']);aliasSeen[k]=true;}}});return;}
  const q=hub_poNum_(r.Qty),period=date<='2026-06-30'?0:1;let decision='EXCLUDED: void/nonposting';
  if(r.TransactionStatus==='Active'&&r.TransactionHistoricalNonPosting==='No'){
-   if(r.TransactionType==='Credit Memo'||q<0){decision='REVIEW: physical return vs financial adjustment';a[id][2+period]++;a[id][4+period]+=r.TransactionType==='Credit Memo'?-q:q;}else{decision='INCLUDED: gross sale';a[id][period]+=q;a[id][4+period]+=q;gross[period]+=q;}
+   if(scope[id][1]==='ENTERNEWPART'){decision='UNRESOLVED: placeholder does not identify a PO product';}else if(r.TransactionType==='Credit Memo'||q<0){decision='REVIEW: physical return vs financial adjustment';a[id][2+period]++;a[id][4+period]+=r.TransactionType==='Credit Memo'?-q:q;}else{decision='INCLUDED: gross sale';a[id][period]+=q;a[id][4+period]+=q;gross[period]+=q;}
  }
- const line=[r.TransactionDetailId,r.TransactionTransactionId,r.TransactionNumber,date,r.TransactionType,r.TransactionStatus,r.TransactionHistoricalNonPosting,r.ItemItemId,r.ItemNumber||'',r.ItemName||'',r.Description||'',q,r.Amount,r.InventoryLocation||'',decision,Number(id),rawId===id?'Exact Item ID':'Verified same-UPC alias'];audit.push(line);if(decision.indexOf('REVIEW:')===0)review.push(line);
+ const line=[r.TransactionDetailId,r.TransactionTransactionId,r.TransactionNumber,date,r.TransactionType,r.TransactionStatus,r.TransactionHistoricalNonPosting,r.ItemItemId,r.ItemNumber||'',r.ItemName||'',r.Description||'',q,r.Amount,r.InventoryLocation||'',decision,Number(id),rawId===id?'Exact Item ID':'Verified same-UPC alias'];audit.push(line);if(decision.indexOf('REVIEW:')===0)review.push(line);if(decision.indexOf('UNRESOLVED:')===0)identityReview.push(line);
  });
  const summary=[['Item ID','SKU','Item name','PO 2739 ordered','PO 2744 ordered','PO 2745 ordered','Total ordered','Jan-Jun gross sold','Jul-Dec gross sold to cutoff','Jan-Jun return-review lines','Jul-Dec return-review lines','Jan-Jun verified net sold','Jul-Dec verified net sold','Current on hand','Current available (Striven)','Inventory snapshot UTC','Exceptions','Jan-Jun accounting signed quantity','Jul-Dec accounting signed quantity','Current committed to SO','Current on PO','Sales through']];
- Object.values(scope).sort((x,y)=>String(x[1]).localeCompare(String(y[1]))).forEach(s=>{const id=String(s[0]),n=a[id],v=iv[id];if(!v)throw new Error('Inventory item missing.');let ex=[s[9],v[10]];if(n[2]||n[3])ex.push('RETURN REVIEW');if(aliases.some((r,j)=>j>0&&(String(r[0])===id||String(r[2])===id)&&String(r[5]).indexOf('REVIEW:')===0))ex.push('SKU REVIEW: exact ID totals only');summary.push(s.slice(0,7).concat(n.slice(0,4),[n[2]?'':n[0],n[3]?'':n[1],v[4],v[11],v[13],ex.filter(Boolean).join('; '),n[4],n[5],v[5],v[6],through]));});
- return {summary:summary,audit:audit,review:review,aliases:aliases,gross:gross};
+ Object.values(scope).sort((x,y)=>String(x[1]).localeCompare(String(y[1]))).forEach(s=>{const id=String(s[0]),n=a[id],v=iv[id];if(!v)throw new Error('Inventory item missing.');let ex=[s[9],v[10]];if(n[2]||n[3])ex.push('RETURN REVIEW');if(aliases.some((r,j)=>j>0&&(String(r[0])===id||String(r[2])===id)&&String(r[5]).indexOf('REVIEW:')===0))ex.push('SKU REVIEW: exact ID totals only');summary.push(s.slice(0,7).concat(n.slice(0,4),[n[2]?'':n[0],n[3]?'':n[1],v[4],v[11],v[13],ex.filter(Boolean).join('; '),n[4],n[5],v[5],v[6],through]));if(s[1]==='ENTERNEWPART'){const row=summary[summary.length-1];[7,8,11,12,17,18].forEach(j=>row[j]='');}});
+ return {summary:summary,audit:audit,review:review,aliases:aliases,gross:gross,identityReview:identityReview};
 }
 function hub_poTable_(ss,name,rows){const sh=ss.getSheetByName(name)||ss.insertSheet(name),cols=Math.max.apply(null,rows.map(r=>r.length));if(sh.getMaxRows()<rows.length)sh.insertRowsAfter(sh.getMaxRows(),rows.length-sh.getMaxRows());if(sh.getMaxColumns()<cols)sh.insertColumnsAfter(sh.getMaxColumns(),cols-sh.getMaxColumns());const matrix=rows.map(r=>r.concat(Array(cols-r.length).fill('')).map(v=>typeof v==='string'&&/^[=+@]/.test(v)?"'"+v:v));sh.clearContents();sh.getRange(1,1,matrix.length,cols).setValues(matrix);sh.setFrozenRows(1);sh.getRange(1,1,1,cols).setBackground('#19334d').setFontColor('#ffffff').setFontWeight('bold');if(sh.getFilter())sh.getFilter().remove();sh.getRange(1,1,Math.max(1,matrix.length),cols).createFilter();if(name.indexOf('PO_API_')===0)sh.hideSheet();}
 let hub_poDeadlineMs_=0;
@@ -3421,5 +3422,33 @@ function hub_inspectPoScopeChanges() {
   hub_poTable_(ss,'PO_SCOPE_CHANGES',rows);
   const out={status:'SCOPE_INSPECTED',poRows:pos.length,selectedLines:detail.length,items:Object.keys(current).length,ordered:detail.reduce((n,r)=>n+hub_poNum_(r.Qty),0),changes:rows.length-1};
   Logger.log(JSON.stringify(out));return out;
+ }finally{lock.releaseLock();}
+}
+
+/** Google Apps Script — recompute reports from the last successful source/inventory snapshot, with no API reads. */
+function hub_rebuildPoAnalysisFromLastSnapshot() {
+ const lock=LockService.getDocumentLock();
+ if(!lock.tryLock(10000))throw new Error('PO analysis already running.');
+ try {
+  const ss=SpreadsheetApp.getActive(),status=ss.getSheetByName('PO_REPORT_STATUS').getDataRange().getValues();
+  if(!status.some(r=>r[0]==='Refresh'&&r[1]==='PASS_WITH_EXCEPTIONS'))throw new Error('A successful live snapshot is required before cached recomputation.');
+  const cached=ss.getSheetByName('PO_API_SALES_LINES').getDataRange().getValues(),fields=cached[0],seen={};
+  const sales=cached.slice(1).map(r=>{const x={};fields.forEach((k,i)=>x[k]=r[i]);if(x.TransactionTransactionDate instanceof Date)x.TransactionTransactionDate=Utilities.formatDate(x.TransactionTransactionDate,'America/Toronto','MM/dd/yyyy');const id=String(x.TransactionDetailId);if(!/^\\d+$/.test(id)||seen[id])throw new Error('Invalid cached sales identity.');seen[id]=true;hub_poDate_(x.TransactionTransactionDate);hub_poNum_(x.Qty);hub_poNum_(x.Amount);return x;});
+  const scope={};ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!=='')scope[String(r[0])]=r;});
+  const through=ss.getSheetByName('PO_SALES_SUMMARY').getRange('V2').getDisplayValue();
+  if(!/^2026-\\d{2}-\\d{2}$/.test(through))throw new Error('Successful snapshot cutoff missing.');
+  const iv={};ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues().slice(1).forEach(r=>{if(r[1]!=='')iv[String(r[1])]=r.slice();});
+  const aliases=hub_poApprovedAliases_(),inventory=ss.getSheetByName('PO_ALIAS_INVENTORY').getDataRange().getValues().slice(1);
+  Object.keys(aliases).forEach(id=>{
+    const canonical=iv[aliases[id].canonical];if(!canonical)throw new Error('Canonical inventory missing.');
+    const rows=inventory.filter(r=>String(r[1])===id);if(!rows.length)throw new Error('Alias inventory snapshot missing; run live refresh.');
+    rows.forEach(r=>{[[4,4],[5,6],[6,7],[11,5]].forEach(pair=>{const value=hub_poNum_(r[pair[1]]);if(canonical[pair[0]]!=='')canonical[pair[0]]+=value;});});
+  });
+  const out=hub_poCompute_(sales,scope,iv,through);
+  hub_poTable_(ss,'PO_SALES_SUMMARY',out.summary);hub_poTable_(ss,'PO_TRANSACTION_AUDIT',out.audit);hub_poTable_(ss,'PO_RETURN_REVIEW',out.review);hub_poTable_(ss,'PO_SKU_REVIEW',out.aliases);hub_poTable_(ss,'PO_ITEM_IDENTITY_REVIEW',out.identityReview);
+  const now=new Date().toISOString(),prior=status.filter(r=>r[0]!=='Recompute'&&r[0]!=='Product identity');prior.push(['Product identity','REVIEW',(out.identityReview.length-1)+' unresolved sales lines; placeholders excluded from product totals'],['Recompute','PASS',now+'; no API reads; source and inventory freshness unchanged']);
+  hub_poTable_(ss,'PO_REPORT_STATUS',prior);
+  const result={status:'CACHED_RECOMPUTE_PASS',items:out.summary.length-1,grossJanJun:out.gross[0],grossJulThrough:out.gross[1],identityReviewLines:out.identityReview.length-1,apiReads:0,through:through};
+  Logger.log(JSON.stringify(result));return result;
  }finally{lock.releaseLock();}
 }
