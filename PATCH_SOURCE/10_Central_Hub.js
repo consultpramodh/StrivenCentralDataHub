@@ -3061,3 +3061,56 @@ function hub_writeTableSheet_(ss, sheetName, headers, rows) {
 /* === HUB_PO_INVENTORY_SCOPE_R1_END === */
 
 
+
+
+/* === HUB_PO_TX_PROBE_R1 === */
+function hub_probeTransactionEndpoints() {
+  const props = PropertiesService.getScriptProperties();
+  const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+  const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+  if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+
+  const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+  const endpoints = [
+    '/v1/invoices/search',
+    '/v1/credit-memos/search',
+    '/v1/sales-receipts/search'
+  ];
+  const payloads = [
+    { PageIndex: 0, PageSize: 2, SortExpression: 'TransactionDate', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2, SortExpression: 'Date', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2 }
+  ];
+  const rows = [['Endpoint','Payload','HTTP','Response Preview']];
+
+  endpoints.forEach(function(path) {
+    payloads.forEach(function(payload) {
+      const response = UrlFetchApp.fetch('https://api.striven.com' + path, {
+        method: 'post',
+        headers: {
+          Authorization: 'Bearer ' + tokenInfo.accessToken,
+          Accept: 'application/json'
+        },
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+      rows.push([
+        path,
+        JSON.stringify(payload),
+        response.getResponseCode(),
+        hub_safeExternalText_(response.getContentText(), 2000)
+      ]);
+    });
+  });
+
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName('PO_TX_PROBE');
+  if (!sh) sh = ss.insertSheet('PO_TX_PROBE');
+  sh.clearContents();
+  sh.getRange(1,1,rows.length,rows[0].length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, rows[0].length);
+  return {status:'PASS', rows:rows.length - 1};
+}
+/* === HUB_PO_TX_PROBE_R1_END === */
