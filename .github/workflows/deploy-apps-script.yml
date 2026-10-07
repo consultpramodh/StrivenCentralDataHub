@@ -68,18 +68,17 @@ jobs:
           clasp pull --project PRE
           tar -czf PRE_APPS_SCRIPT.tar.gz -C PRE .
 
-      - name: Build deploy source
+      - name: Build deploy source from live PRE
         run: |
           set -euo pipefail
           SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
           mkdir -p WORK/src
-          cp PATCH_SOURCE/00_Config.js WORK/src/
-          cp PATCH_SOURCE/10_Central_Hub.js WORK/src/
-          cp PATCH_SOURCE/90_Tests.js WORK/src/
-          cp PATCH_SOURCE/appsscript.json WORK/src/
+          cp -a PRE/src/. WORK/src/
+          cp PATCH_SOURCE/10_Central_Hub.js WORK/src/10_Central_Hub.js
           cat > WORK/.clasp.json <<EOF
           {"scriptId":"$SCRIPT_ID","rootDir":"src"}
           EOF
+          diff -q PATCH_SOURCE/10_Central_Hub.js WORK/src/10_Central_Hub.js
 
       - name: Freshness check before push
         run: |
@@ -90,11 +89,7 @@ jobs:
           {"scriptId":"$SCRIPT_ID","rootDir":"src"}
           EOF
           clasp pull --project FRESH
-          PRE_SHA="$(find PRE/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
-          FRESH_SHA="$(find FRESH/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
-          echo "PRE_SHA=$PRE_SHA"
-          echo "FRESH_SHA=$FRESH_SHA"
-          test "$PRE_SHA" = "$FRESH_SHA"
+          diff -qr PRE/src FRESH/src
 
       - name: Push to Apps Script
         run: |
@@ -110,11 +105,8 @@ jobs:
           {"scriptId":"$SCRIPT_ID","rootDir":"src"}
           EOF
           clasp pull --project POST
-          WORK_SHA="$(find WORK/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
-          POST_SHA="$(find POST/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
-          echo "WORK_SHA=$WORK_SHA"
-          echo "POST_SHA=$POST_SHA"
-          test "$WORK_SHA" = "$POST_SHA"
+          diff -qr WORK/src POST/src
+          diff -q PATCH_SOURCE/10_Central_Hub.js POST/src/10_Central_Hub.js
           grep -q "function hub_refreshPoSalesScope()" POST/src/10_Central_Hub.js
           grep -q "Refresh PO Sales Scope','hub_refreshPoSalesScope" POST/src/10_Central_Hub.js
 
