@@ -2711,6 +2711,7 @@ function hub_refreshPoInventoryScope() {
   );
 
   let apiCalls = 0;
+  const snapshotUtc = new Date().toISOString();
 
   try {
     const ss = SpreadsheetApp.getActive();
@@ -2740,6 +2741,11 @@ function hub_refreshPoInventoryScope() {
       });
 
     if (!items.length) throw new Error('PO_ITEM_SCOPE contains zero Item IDs.');
+    const itemIds = {};
+    items.forEach(function(x) {
+      if (!Number.isInteger(x.itemId) || x.itemId <= 0 || itemIds[x.itemId]) throw new Error('Invalid or duplicate scoped Item ID: '+x.itemId);
+      itemIds[x.itemId] = true;
+    });
 
     const props = PropertiesService.getScriptProperties();
     const clientId = String(
@@ -2779,10 +2785,12 @@ function hub_refreshPoInventoryScope() {
           itemId: item.itemId,
           itemNumber: item.itemNumber,
           itemName: item.itemName,
-          qtyOnHand: 0,
-          qtyOnSO: 0,
-          qtyOnPO: 0,
-          qtyOnBuild: 0,
+          qtyOnHand: '',
+          qtyOnSO: '',
+          qtyOnPO: '',
+          qtyOnBuild: '',
+          qtyAvailable: '',
+          qtyPendingBuild: '',
           locationCount: 0,
           exception: 'NO INVENTORY LOCATION ROWS RETURNED'
         };
@@ -2798,28 +2806,27 @@ function hub_refreshPoInventoryScope() {
         qtyOnSO: 0,
         qtyOnPO: 0,
         qtyOnBuild: 0,
+        qtyAvailable: 0,
+        qtyPendingBuild: 0,
         locationCount: 0,
         exception: ''
       };
 
+      const seenLocations = {};
       locations.forEach(function(loc) {
-        const locationId = hub_pickInventoryField_(loc, [
-          'locationId','LocationId','inventoryLocationId','InventoryLocationId','id','Id'
-        ], '');
+        const locationId = hub_requiredInventoryNumber_(loc, 'inventoryLocationID');
+        if (!Number.isInteger(locationId) || locationId <= 0 || seenLocations[locationId]) {
+          throw new Error('Invalid or duplicate inventory location for Item ID '+item.itemId);
+        }
+        seenLocations[locationId] = true;
         const locationName = hub_inventoryLocationName_(loc);
-
-        const qtyOnHand = hub_numberOrZero_(hub_pickInventoryField_(loc, [
-          'qtyOnHand','QtyOnHand','quantityOnHand','QuantityOnHand'
-        ], 0));
-        const qtyOnSO = hub_numberOrZero_(hub_pickInventoryField_(loc, [
-          'qtyOnSO','QtyOnSO','quantityOnSO','QuantityOnSO'
-        ], 0));
-        const qtyOnPO = hub_numberOrZero_(hub_pickInventoryField_(loc, [
-          'qtyOnPO','QtyOnPO','quantityOnPO','QuantityOnPO'
-        ], 0));
-        const qtyOnBuild = hub_numberOrZero_(hub_pickInventoryField_(loc, [
-          'qtyOnBuild','QtyOnBuild','quantityOnBuild','QuantityOnBuild'
-        ], 0));
+        if (!locationName) throw new Error('Inventory location name missing for Item ID '+item.itemId);
+        const qtyOnHand = hub_requiredInventoryNumber_(loc, 'qtyOnHand');
+        const qtyOnSO = hub_requiredInventoryNumber_(loc, 'qtyOnSalesOrders');
+        const qtyOnPO = hub_requiredInventoryNumber_(loc, 'qtyOnPurchaseOrders');
+        const qtyOnBuild = hub_requiredInventoryNumber_(loc, 'qtyOnIncompleteBuilds');
+        const qtyAvailable = hub_requiredInventoryNumber_(loc, 'qtyAvailable');
+        const qtyPendingBuild = hub_requiredInventoryNumber_(loc, 'qtyOnPendingBuilds');
 
         detailRows.push([
           asOfDate,
@@ -2832,13 +2839,18 @@ function hub_refreshPoInventoryScope() {
           qtyOnSO,
           qtyOnPO,
           qtyOnBuild,
-          qtyOnHand - qtyOnSO
+          qtyOnHand - qtyOnSO,
+          qtyAvailable,
+          qtyPendingBuild,
+          snapshotUtc
         ]);
 
         sum.qtyOnHand += qtyOnHand;
         sum.qtyOnSO += qtyOnSO;
         sum.qtyOnPO += qtyOnPO;
         sum.qtyOnBuild += qtyOnBuild;
+        sum.qtyAvailable += qtyAvailable;
+        sum.qtyPendingBuild += qtyPendingBuild;
         sum.locationCount++;
       });
 
@@ -2855,8 +2867,11 @@ function hub_refreshPoInventoryScope() {
       'Qty On Hand',
       'Qty On SO',
       'Qty On PO',
-      'Qty On Build',
-      'Available Calc (On Hand - On SO)'
+      'Qty On Incomplete Builds',
+      'Available Calc (On Hand - On SO)',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
     ];
 
     const summaryHeaders = [
@@ -2867,20 +2882,18 @@ function hub_refreshPoInventoryScope() {
       'Qty On Hand',
       'Qty On SO',
       'Qty On PO',
-      'Qty On Build',
+      'Qty On Incomplete Builds',
       'Available Calc (On Hand - On SO)',
       'Inventory Location Count',
-      'Exception'
+      'Exception',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
     ];
 
     const summaryRows = items.map(function(item) {
-      const x = summaryByItem[item.itemId] || {
-        itemId:item.itemId,
-        itemNumber:item.itemNumber,
-        itemName:item.itemName,
-        qtyOnHand:0,qtyOnSO:0,qtyOnPO:0,qtyOnBuild:0,locationCount:0,
-        exception:'NO SUMMARY'
-      };
+      const x = summaryByItem[item.itemId];
+      if (!x) throw new Error('Missing inventory summary for Item ID '+item.itemId);
       return [
         asOfDate,
         x.itemId,
@@ -2890,9 +2903,12 @@ function hub_refreshPoInventoryScope() {
         x.qtyOnSO,
         x.qtyOnPO,
         x.qtyOnBuild,
-        x.qtyOnHand - x.qtyOnSO,
+        x.locationCount ? x.qtyOnHand - x.qtyOnSO : '',
         x.locationCount,
-        x.exception
+        x.exception,
+        x.qtyAvailable,
+        x.qtyPendingBuild,
+        snapshotUtc
       ];
     });
 
@@ -2996,7 +3012,7 @@ function hub_fetchItemInventoryLocations_(itemId, asOfDate, token) {
 
 function hub_extractInventoryLocationRows_(payload) {
   if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== 'object') return [];
+  if (!payload || typeof payload !== 'object') throw new Error('Unrecognized inventory response; existing tables retained.');
 
   const candidates = [
     payload.data, payload.Data,
@@ -3010,7 +3026,7 @@ function hub_extractInventoryLocationRows_(payload) {
     if (Array.isArray(candidates[i])) return candidates[i];
   }
 
-  return [];
+  throw new Error('Inventory response missing a recognized array; existing tables retained.');
 }
 
 function hub_pickInventoryField_(obj, keys, fallback) {
@@ -3057,6 +3073,19 @@ function hub_writeTableSheet_(ss, sheetName, headers, rows) {
   }
   sh.setFrozenRows(1);
   sh.autoResizeColumns(1, headers.length);
+}
+
+/** Exact response fields verified in PO_DATA_CONTRACT_PROBE on 2026-10-07. */
+function hub_requiredInventoryNumber_(obj, key) {
+  if (!obj || !Object.prototype.hasOwnProperty.call(obj,key) ||
+      obj[key] === null || obj[key] === undefined ||
+      typeof obj[key] === 'boolean' || String(obj[key]).trim() === '' ||
+      (typeof obj[key] !== 'number' && typeof obj[key] !== 'string')) {
+    throw new Error('Missing or invalid inventory field: '+key+'; existing inventory tables retained.');
+  }
+  const n = Number(obj[key]);
+  if (!Number.isFinite(n)) throw new Error('Non-numeric inventory field: '+key);
+  return n;
 }
 /* === HUB_PO_INVENTORY_SCOPE_R1_END === */
 
