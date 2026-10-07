@@ -1,3 +1,6 @@
+/** Google Apps Script — read-only current PO scope inspection. */
+function test_CurrentPoScopeSource() { return hub_inspectPoScopeChanges(); }
+
 /** Google Apps Script — current PO analysis release test. */
 function test_PoAnalysisRefreshAndVerify() {
   const f={TransactionDetailId:1,TransactionTransactionId:1,TransactionNumber:'TEST',TransactionTransactionDate:'06/30/2026',TransactionType:'Invoice',TransactionStatus:'Active',TransactionHistoricalNonPosting:'No',ItemItemId:1,ItemNumber:'TEST',ItemName:'TEST',Description:'',Qty:2,Amount:20,InventoryLocation:null};
