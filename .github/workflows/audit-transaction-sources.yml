@@ -1,0 +1,39 @@
+name: Audit Central Hub Transaction Sources
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/audit-transaction-sources.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure clasp auth
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull live Hub
+        run: |
+          mkdir -p LIVE/src
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          cat > LIVE/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+          clasp pull --project LIVE
+      - name: Show transaction source evidence
+        run: |
+          grep -RniE -C 10 '/v1/invoices|invoice[s]?/search|sales.?receipt|credit.?memo|transaction[s]?|lineItems|line.?items' LIVE/src || true
