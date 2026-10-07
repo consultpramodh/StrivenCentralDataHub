@@ -2294,11 +2294,8 @@ function hub_refreshPoSalesScope() {
     'yyyyMMdd_HHmmss'
   );
 
-  const poTargets = [
-    { recordId: 4168, poNumber: '2744' },
-    { recordId: 4173, poNumber: '2739' },
-    { recordId: 4174, poNumber: '2745' }
-  ];
+  const poRecordIds = [4168, 4173, 4174];
+  const expectedPoNumbers = ['2739', '2744', '2745'];
   let apiCalls = 0;
 
   try {
@@ -2327,9 +2324,9 @@ function hub_refreshPoSalesScope() {
 
     const itemNumberById = hub_poSalesScopeItemNumberMap_();
     const rows = [];
+    const returnedPoNumbers = [];
 
-    poTargets.forEach(function(target) {
-      const poRecordId = target.recordId;
+    poRecordIds.forEach(function(poRecordId) {
       const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
       apiCalls++;
 
@@ -2339,13 +2336,13 @@ function hub_refreshPoSalesScope() {
         );
       }
 
-      if (String(po.poNumber || '').trim() !== target.poNumber) {
+      const returnedPoNumber = String(po.poNumber || '').trim();
+      if (!returnedPoNumber) {
         throw new Error(
-          'Purchase Order number mismatch for record ' + poRecordId +
-          '. Expected PO ' + target.poNumber +
-          ', got ' + String(po.poNumber || '') + '.'
+          'Purchase Order record ' + poRecordId + ' returned a blank PO Number.'
         );
       }
+      returnedPoNumbers.push(returnedPoNumber);
 
       const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
       if (!lineItems.length) {
@@ -2384,6 +2381,20 @@ function hub_refreshPoSalesScope() {
         ]);
       });
     });
+
+    const actualPoNumbers = returnedPoNumbers.slice().sort();
+    const expectedSorted = expectedPoNumbers.slice().sort();
+
+    if (
+      actualPoNumbers.length !== expectedSorted.length ||
+      actualPoNumbers.some(function(v, i) { return v !== expectedSorted[i]; })
+    ) {
+      throw new Error(
+        'PO scope mismatch. Records ' + poRecordIds.join(', ') +
+        ' returned [' + actualPoNumbers.join(', ') +
+        '], expected exactly [' + expectedSorted.join(', ') + '].'
+      );
+    }
 
     if (!rows.length) {
       throw new Error('PO Sales Scope produced zero rows; existing sheet was not replaced.');
@@ -2438,7 +2449,9 @@ function hub_refreshPoSalesScope() {
       '2744,2739,2745',
       'PO Sales Scope refreshed.',
       JSON.stringify({
-        poTargets: poTargets,
+        poRecordIds: poRecordIds,
+        expectedPoNumbers: expectedPoNumbers,
+        returnedPoNumbers: returnedPoNumbers,
         rows: rows.length,
         apiCalls: apiCalls,
         tokenRequestMade: tokenInfo.requestedNewToken,
@@ -2455,7 +2468,9 @@ function hub_refreshPoSalesScope() {
 
     return {
       status: 'PASS',
-      poTargets: poTargets,
+      poRecordIds: poRecordIds,
+      expectedPoNumbers: expectedPoNumbers,
+      returnedPoNumbers: returnedPoNumbers,
       rows: rows.length,
       apiCalls: apiCalls,
       tokenRequestMade: tokenInfo.requestedNewToken,
