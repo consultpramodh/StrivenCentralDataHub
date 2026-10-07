@@ -3114,3 +3114,81 @@ function hub_probeTransactionEndpoints() {
   return {status:'PASS', rows:rows.length - 1};
 }
 /* === HUB_PO_TX_PROBE_R1_END === */
+
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1 === */
+/**
+ * Google Apps Script: read-only source inspection; manual execution.
+ * Outputs complete response bodies to PO_DATA_CONTRACT_PROBE, never public logs.
+ * No transaction totals or inventory numbers are inferred from this probe.
+ */
+function hub_probePoDataContracts() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('PO data contract probe already running.');
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const prior = ss.getSheetByName('PO_TX_PROBE');
+    if (!prior || prior.getLastRow() < 2) throw new Error('Run hub_probeTransactionEndpoints first.');
+    const sourceRows = prior.getRange(2,1,prior.getLastRow()-1,4).getValues();
+    const requests = [];
+    const seen = {};
+    sourceRows.forEach(function(row) {
+      if (Number(row[2]) !== 200) return;
+      let p;
+      try { p = JSON.parse(String(row[3])); } catch(e) { return; }
+      if (!Array.isArray(p.data)) return;
+      let root = '';
+      if (row[0] === '/v1/invoices/search') root = '/v1/invoices/';
+      if (row[0] === '/v1/credit-memos/search') root = '/v1/credit-memos/';
+      if (!root) return;
+      p.data.slice(0,2).forEach(function(x) {
+        if (!x || !Number.isInteger(Number(x.id)) || Number(x.id) <= 0) return;
+        const path = root + Number(x.id);
+        if (seen[path]) return;
+        seen[path] = true;
+        requests.push({path:path,method:'get',body:null});
+      });
+    });
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:1,PageSize:2}});
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:0,PageSize:3}});
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) throw new Error('PO_ITEM_SCOPE missing.');
+    const scopeRows = scope.getDataRange().getValues();
+    const idCol = scopeRows[0].indexOf('Item ID');
+    if (idCol < 0) throw new Error('PO_ITEM_SCOPE missing Item ID.');
+    const asOfDate = Utilities.formatDate(new Date(), 'America/Toronto', 'yyyy-MM-dd');
+    scopeRows.slice(1).filter(function(row) { return Number(row[idCol]) > 0 && Number(row[idCol]) !== 36935; })
+      .slice(0,2).forEach(function(row) {
+        requests.push({path:'/v1/items/'+Number(row[idCol])+'/inventory-locations?asofDate='+asOfDate,method:'get',body:null});
+      });
+    if (!requests.some(function(x) { return x.path.indexOf('/v1/invoices/') === 0; })) {
+      throw new Error('No parseable successful invoice sample; existing probe output retained.');
+    }
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+    if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+    const token = hub_strivenAccessToken_(clientId,clientSecret);
+    const snapshot = new Date().toISOString();
+    const rows = requests.map(function(x) {
+      const options = {method:x.method,headers:{Authorization:'Bearer '+token.accessToken,Accept:'application/json'},muteHttpExceptions:true};
+      if (x.body) { options.contentType='application/json'; options.payload=JSON.stringify(x.body); }
+      const response = UrlFetchApp.fetch('https://api.striven.com'+x.path,options);
+      const status = response.getResponseCode();
+      if (status === 401) {
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+        throw new Error('Striven authorization expired; existing probe retained.');
+      }
+      const text = response.getContentText();
+      if (text.length > 45000) throw new Error('Response exceeds cell limit; refusing truncated contract evidence.');
+      let keys = '';
+      try { const p=JSON.parse(text); keys=Array.isArray(p)?'ARRAY':Object.keys(p||{}).join(', '); } catch(e) {}
+      return [snapshot,x.method.toUpperCase(),x.path,x.body?JSON.stringify(x.body):'',status,keys,text];
+    });
+    hub_writeTableSheet_(ss,'PO_DATA_CONTRACT_PROBE',
+      ['Snapshot UTC','Method','Endpoint','Request','HTTP','Top-level Fields','Full Response'],rows);
+    const failures=rows.filter(function(r) { return r[4] < 200 || r[4] >= 300; }).length;
+    return {status:failures?'PARTIAL':'PASS',requests:rows.length,httpFailures:failures,strivenWritesPerformed:false};
+  } finally { lock.releaseLock(); }
+}
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1_END === */
