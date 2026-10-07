@@ -2328,7 +2328,8 @@ function hub_refreshPoSalesScope() {
     const itemNumberById = hub_poSalesScopeItemNumberMap_();
     const rows = [];
 
-    poTargets.forEach(function(target) {\n      const poRecordId = target.recordId;
+    poTargets.forEach(function(target) {
+      const poRecordId = target.recordId;
       const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
       apiCalls++;
 
