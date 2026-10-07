@@ -3279,7 +3279,7 @@ function hub_refreshPoAnalysis() {
     if(prior.length!==current.length||current.some(r=>!prior.some(p=>String(p[0])===String(r[0])&&Number(p[6])===r[6])))throw new Error('Selected PO scope changed; retained prior results for review.');
     // Validate all external values before publishing any sales or PO data.
     sales.forEach(r=>{hub_poDate_(r.TransactionTransactionDate);hub_poNum_(r.Qty);hub_poNum_(r.Amount);if(['Invoice','Sales Receipt','Credit Memo'].indexOf(r.TransactionType)<0)throw new Error('Unexpected transaction type.');if(['Active','Voided'].indexOf(r.TransactionStatus)<0)throw new Error('Unexpected transaction status.');if(['Yes','No'].indexOf(r.TransactionHistoricalNonPosting)<0)throw new Error('Unexpected nonposting flag.');});
-    const through=Utilities.formatDate(new Date(Date.now()-86400000),'America/Toronto','yyyy-MM-dd');
+    const through=[Utilities.formatDate(new Date(Date.now()-86400000),'America/Toronto','yyyy-MM-dd'),'2026-12-31'].sort()[0];
     const sourceThrough=String(cfg.getRange('B4').getDisplayValue());
     if(!/^2026-\d{2}-\d{2}$/.test(sourceThrough)||sourceThrough<through)throw new Error('Sales report cutoff is stale; update native report and source cutoff.');
     const invResult=hub_refreshPoInventoryScope();
@@ -3437,14 +3437,14 @@ function hub_rebuildPoAnalysisFromLastSnapshot() {
   const ss=SpreadsheetApp.getActive(),status=ss.getSheetByName('PO_REPORT_STATUS').getDataRange().getValues();
   if(!status.some(r=>r[0]==='Refresh'&&r[1]==='PASS_WITH_EXCEPTIONS'))throw new Error('A successful live snapshot is required before cached recomputation.');
   const cached=ss.getSheetByName('PO_API_SALES_LINES').getDataRange().getValues(),fields=cached[0],seen={};
-  const sales=cached.slice(1).map(r=>{const x={};fields.forEach((k,i)=>x[k]=r[i]);if(x.TransactionTransactionDate instanceof Date)x.TransactionTransactionDate=Utilities.formatDate(x.TransactionTransactionDate,'America/Toronto','MM/dd/yyyy');const id=String(x.TransactionDetailId);if(!/^\\d+$/.test(id)||seen[id])throw new Error('Invalid cached sales identity.');seen[id]=true;hub_poDate_(x.TransactionTransactionDate);hub_poNum_(x.Qty);hub_poNum_(x.Amount);return x;});
-  const scope={};ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!=='')scope[String(r[0])]=r;});
+  const sales=cached.slice(1).map(r=>{const x={};fields.forEach((k,i)=>x[k]=r[i]);if(x.TransactionTransactionDate instanceof Date)x.TransactionTransactionDate=Utilities.formatDate(x.TransactionTransactionDate,'America/Toronto','MM/dd/yyyy');const id=String(x.TransactionDetailId);if(!/^\d+$/.test(id)||seen[id])throw new Error('Invalid cached sales identity.');seen[id]=true;hub_poDate_(x.TransactionTransactionDate);hub_poNum_(x.Qty);hub_poNum_(x.Amount);return x;});
+  const scope={};ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!==''){scope[String(r[0])]=r.slice();scope[String(r[0])][1]=String(r[1]||'');}});
   const orders=ss.getSheetByName('PO_API_ORDER_LINES').getDataRange().getValues(),oh=orders[0],expected={};
   const indexes=['PurchaseOrderNumber','ItemItemId','Qty'].map(k=>oh.indexOf(k));if(indexes.some(i=>i<0))throw new Error('Cached PO contract missing.');
   orders.slice(1).forEach(r=>{const po=String(r[indexes[0]]),j=['2739','2744','2745'].indexOf(po);if(j<0)return;const id=String(r[indexes[1]]);if(!expected[id])expected[id]=[0,0,0];expected[id][j]+=hub_poNum_(r[indexes[2]]);});
   if(Object.keys(expected).length!==Object.keys(scope).length||Object.keys(scope).some(id=>!expected[id]||expected[id].some((q,j)=>q!==Number(scope[id][j+3]))))throw new Error('PO scope changed since the successful source cache; run live refresh.');
   const through=ss.getSheetByName('PO_SALES_SUMMARY').getRange('V2').getDisplayValue();
-  if(!/^2026-\\d{2}-\\d{2}$/.test(through))throw new Error('Successful snapshot cutoff missing.');
+  if(!/^2026-\d{2}-\d{2}$/.test(through))throw new Error('Successful snapshot cutoff missing.');
   const iv={};ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues().slice(1).forEach(r=>{if(r[1]!=='')iv[String(r[1])]=r.slice();});
   const aliases=hub_poApprovedAliases_(),inventory=ss.getSheetByName('PO_ALIAS_INVENTORY').getDataRange().getValues().slice(1);
   Object.keys(aliases).forEach(id=>{
