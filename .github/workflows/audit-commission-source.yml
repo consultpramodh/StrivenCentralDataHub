@@ -1,0 +1,41 @@
+name: Audit Commission Transaction Source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/audit-commission-source.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure clasp auth
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull Employee Commission project
+        run: |
+          mkdir -p COMM/src
+          cat > COMM/.clasp.json <<'EOF'
+          {"scriptId":"1OY40FroButRetp8Qj-FrFKeJwKW_Lg8Zua9ARLECdMaIkyHIxPGzpVOs","rootDir":"src"}
+          EOF
+          clasp pull --project COMM
+      - name: Show transaction/report source
+        run: |
+          echo "=== FILES ==="
+          find COMM/src -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "=== MATCHES ==="
+          grep -RniE -C 12 'Transactions Raw|fetchStrivenPagedReport_|api\.striven\.com/v2/reports|TransactionNumber|TransactionType|Sales Receipt|Credit Memo|Invoice' COMM/src || true
