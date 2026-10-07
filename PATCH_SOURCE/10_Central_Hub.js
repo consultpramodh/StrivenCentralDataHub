@@ -2977,7 +2977,7 @@ function hub_fetchItemInventoryLocations_(itemId, asOfDate, token) {
     '/inventory-locations?asofDate=' +
     encodeURIComponent(String(asOfDate));
 
-  const response = UrlFetchApp.fetch(url, {
+  const response = hub_poReadFetch_(url, {
     method: 'get',
     headers: {
       Authorization: 'Bearer ' + token,
@@ -3252,7 +3252,7 @@ function hub_probePoReportFeeds() {
 function hub_refreshPoAnalysis() {
   const guard=LockService.getDocumentLock();
   if(!guard.tryLock(10000))throw new Error('PO analysis already running.');
-  const ss=SpreadsheetApp.getActive(),snap=new Date().toISOString();
+  const ss=SpreadsheetApp.getActive(),snap=new Date().toISOString();hub_poDeadlineMs_=Date.now()+330000;hub_poRetryCount_=0;
   try {
     hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','RUNNING',snap]]);
     const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG');
@@ -3278,7 +3278,9 @@ function hub_refreshPoAnalysis() {
     if(!/^2026-\d{2}-\d{2}$/.test(sourceThrough)||sourceThrough<through)throw new Error('Sales report cutoff is stale; update native report and source cutoff.');
     const invResult=hub_refreshPoInventoryScope();
     const invRows=ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues(),iv={};invRows.slice(1).forEach(r=>iv[String(r[1])]=r);
+    const aliasInventory=hub_poAliasInventory_(iv,token,through);
     const result=hub_poCompute_(sales,scope,iv,through);
+    hub_poTable_(ss,'PO_ALIAS_INVENTORY',aliasInventory);
     hub_poTable_(ss,'PO_API_SALES_LINES',[salesFields].concat(sales.map(r=>salesFields.map(k=>r[k]==null?'':r[k]))));
     hub_poTable_(ss,'PO_API_ORDER_LINES',[poFields].concat(pos.map(r=>poFields.map(k=>r[k]==null?'':r[k]))));
     hub_poTable_(ss,'PO_ORDER_DETAIL',[poFields].concat(detail.map(r=>poFields.map(k=>r[k]==null?'':r[k]))));
@@ -3288,7 +3290,7 @@ function hub_refreshPoAnalysis() {
     hub_poTable_(ss,'PO_SKU_REVIEW',result.aliases);
     SpreadsheetApp.flush();
     if(ss.getSheetByName('PO_API_SALES_LINES').getLastRow()-1!==sales.length||ss.getSheetByName('PO_SALES_SUMMARY').getLastRow()-1!==current.length)throw new Error('Published row count mismatch.');
-    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,aliasReviewRows:result.aliases.length-1,through:through,snapshot:snap,strivenWritesPerformed:false};
+    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,aliasReviewRows:result.aliases.length-1,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
     hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','PASS_WITH_EXCEPTIONS',snap],['Sales through',through,'Actual transactions only; no Jul-Dec forecast'],['API sales import','PASS',sales.length+' unique rows; pagination exhausted and counts reconciled'],['API PO import','PASS',pos.length+' unique rows'],['Selected PO scope','PASS',detail.length+' lines; '+current.length+' Item IDs; '+out.ordered+' ordered'],['Inventory','PASS',invRows[1][13]],['Returns','REVIEW',out.returnReviewLines+' lines; physical returns unknown unless explicitly classified'],['SKU aliases','REVIEW',out.aliasReviewRows+' candidate relationships; not silently included'],['Attribution','PRODUCT POPULATION','Sales for listed products; no physical PO-lot attribution'],['Schedule','MANUAL','Central Hub > Refresh Complete PO Analysis'],['Safety','PASS','No Striven writes; prior sales retained on source validation failures']]);
     Logger.log(JSON.stringify(out));return out;
   }catch(e){hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','FAILED',snap],['Reason','ACTION REQUIRED',String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]')],['Results','STALE','Last successful outputs retained where available; do not treat as a successful refresh']]);throw new Error(String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]'));}finally{guard.releaseLock();}
@@ -3297,7 +3299,7 @@ function hub_poFeed_(url,token,key){
  if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+$/.test(url))throw new Error('Invalid private feed URL.');
  let expected=null,all=[],seen={};
  for(let page=0;page<100;page++){
-   let response;try{response=UrlFetchApp.fetch(hub_reportPagedUrl_(url,page,500),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});}catch(e){throw new Error('Report network failure on page '+page);}
+   let response;try{response=hub_poReadFetch_(hub_reportPagedUrl_(url,page,500),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});}catch(e){throw new Error('Report network failure on page '+page);}
    if(response.getResponseCode()!==200)throw new Error('Report HTTP '+response.getResponseCode()+' on page '+page);
    let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Report response is not JSON.');}
    if(!Array.isArray(p.data)||!Number.isInteger(p.totalRecords)||p.pageIndex!==page)throw new Error('Unexpected report paging contract.');
@@ -3313,18 +3315,43 @@ function hub_poNum_(v){if(v==null||v===''||!Number.isFinite(Number(v)))throw new
 function hub_poDate_(v){const m=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(v));if(!m)throw new Error('Unexpected transaction date format.');const d=new Date(Date.UTC(+m[3],+m[1]-1,+m[2]));if(d.getUTCMonth()!==+m[1]-1||d.getUTCDate()!==+m[2])throw new Error('Invalid transaction date.');return m[3]+'-'+m[1]+'-'+m[2];}
 function hub_poCompute_(sales,scope,iv,through){
  const header=['Line ID','Transaction ID','Transaction number','Date','Type','Status','Nonposting','Item ID','SKU','Item name','Description','Qty','Amount CAD','Inventory location','Decision'];
- const audit=[header],review=[header],a={},gross=[0,0],aliases=[['Scoped Item ID','Scoped SKU','Candidate Item ID','Candidate SKU','Reason','Decision']],aliasSeen={};
+ const approved=hub_poApprovedAliases_();
+ const audit=[header.concat(['Canonical Item ID','Match method'])],review=[header.concat(['Canonical Item ID','Match method'])],a={},gross=[0,0],aliases=[['Scoped Item ID','Scoped SKU','Candidate Item ID','Candidate SKU','Reason','Decision']],aliasSeen={};
  Object.keys(scope).forEach(id=>a[id]=[0,0,0,0,0,0]);
- sales.forEach(r=>{const date=hub_poDate_(r.TransactionTransactionDate),id=String(r.ItemItemId);if(date<'2026-01-01'||date>through||date>'2026-12-31')return;
+ Object.keys(approved).forEach(id=>{const d=approved[id];if(scope[d.canonical])aliases.push([Number(d.canonical),scope[d.canonical][1],Number(id),d.sku+' - INACTIVE',d.evidence,'APPROVED: same UPC']);});
+ sales.forEach(r=>{const date=hub_poDate_(r.TransactionTransactionDate),rawId=String(r.ItemItemId),id=approved[rawId]?approved[rawId].canonical:rawId;if(approved[rawId]&&String(r.ItemNumber||'').replace(/\s*-\s*INACTIVE$/i,'')!==approved[rawId].sku)throw new Error('Approved alias SKU identity changed.');if(date<'2026-01-01'||date>through||date>'2026-12-31')return;
  if(!scope[id]){const sku=String(r.ItemNumber||'').replace(/\s*-\s*INACTIVE$/i,'');Object.values(scope).forEach(s=>{if(sku&&(sku===s[1]||sku.replace(/H$/,'')===s[1].replace(/H$/,'')||sku.replace(/M$/,'')===s[1].replace(/M$/,''))){const k=s[0]+'|'+id;if(!aliasSeen[k]){aliases.push([s[0],s[1],Number(id),r.ItemNumber,'SKU variant / duplicate candidate','REVIEW: identity must be evidenced']);aliasSeen[k]=true;}}});return;}
  const q=hub_poNum_(r.Qty),period=date<='2026-06-30'?0:1;let decision='EXCLUDED: void/nonposting';
  if(r.TransactionStatus==='Active'&&r.TransactionHistoricalNonPosting==='No'){
    if(r.TransactionType==='Credit Memo'||q<0){decision='REVIEW: physical return vs financial adjustment';a[id][2+period]++;a[id][4+period]+=r.TransactionType==='Credit Memo'?-q:q;}else{decision='INCLUDED: gross sale';a[id][period]+=q;a[id][4+period]+=q;gross[period]+=q;}
  }
- const line=[r.TransactionDetailId,r.TransactionTransactionId,r.TransactionNumber,date,r.TransactionType,r.TransactionStatus,r.TransactionHistoricalNonPosting,r.ItemItemId,r.ItemNumber||'',r.ItemName||'',r.Description||'',q,r.Amount,r.InventoryLocation||'',decision];audit.push(line);if(decision.indexOf('REVIEW:')===0)review.push(line);
+ const line=[r.TransactionDetailId,r.TransactionTransactionId,r.TransactionNumber,date,r.TransactionType,r.TransactionStatus,r.TransactionHistoricalNonPosting,r.ItemItemId,r.ItemNumber||'',r.ItemName||'',r.Description||'',q,r.Amount,r.InventoryLocation||'',decision,Number(id),rawId===id?'Exact Item ID':'Verified same-UPC alias'];audit.push(line);if(decision.indexOf('REVIEW:')===0)review.push(line);
  });
  const summary=[['Item ID','SKU','Item name','PO 2739 ordered','PO 2744 ordered','PO 2745 ordered','Total ordered','Jan-Jun gross sold','Jul-Dec gross sold to cutoff','Jan-Jun return-review lines','Jul-Dec return-review lines','Jan-Jun verified net sold','Jul-Dec verified net sold','Current on hand','Current available (Striven)','Inventory snapshot UTC','Exceptions','Jan-Jun accounting signed quantity','Jul-Dec accounting signed quantity','Current committed to SO','Current on PO','Sales through']];
- Object.values(scope).sort((x,y)=>String(x[1]).localeCompare(String(y[1]))).forEach(s=>{const id=String(s[0]),n=a[id],v=iv[id];if(!v)throw new Error('Inventory item missing.');let ex=[s[9],v[10]];if(n[2]||n[3])ex.push('RETURN REVIEW');if(aliases.some((r,j)=>j>0&&String(r[0])===id))ex.push('SKU REVIEW: exact ID totals only');summary.push(s.slice(0,7).concat(n.slice(0,4),[n[2]?'':n[0],n[3]?'':n[1],v[4],v[11],v[13],ex.filter(Boolean).join('; '),n[4],n[5],v[5],v[6],through]));});
+ Object.values(scope).sort((x,y)=>String(x[1]).localeCompare(String(y[1]))).forEach(s=>{const id=String(s[0]),n=a[id],v=iv[id];if(!v)throw new Error('Inventory item missing.');let ex=[s[9],v[10]];if(n[2]||n[3])ex.push('RETURN REVIEW');if(aliases.some((r,j)=>j>0&&String(r[0])===id&&String(r[5]).indexOf('REVIEW:')===0))ex.push('SKU REVIEW: exact ID totals only');summary.push(s.slice(0,7).concat(n.slice(0,4),[n[2]?'':n[0],n[3]?'':n[1],v[4],v[11],v[13],ex.filter(Boolean).join('; '),n[4],n[5],v[5],v[6],through]));});
  return {summary:summary,audit:audit,review:review,aliases:aliases,gross:gross};
 }
 function hub_poTable_(ss,name,rows){const sh=ss.getSheetByName(name)||ss.insertSheet(name),cols=Math.max.apply(null,rows.map(r=>r.length));if(sh.getMaxRows()<rows.length)sh.insertRowsAfter(sh.getMaxRows(),rows.length-sh.getMaxRows());if(sh.getMaxColumns()<cols)sh.insertColumnsAfter(sh.getMaxColumns(),cols-sh.getMaxColumns());const matrix=rows.map(r=>r.concat(Array(cols-r.length).fill('')).map(v=>typeof v==='string'&&/^[=+@]/.test(v)?"'"+v:v));sh.clearContents();sh.getRange(1,1,matrix.length,cols).setValues(matrix);sh.setFrozenRows(1);sh.getRange(1,1,1,cols).setBackground('#19334d').setFontColor('#ffffff').setFontWeight('bold');if(sh.getFilter())sh.getFilter().remove();sh.getRange(1,1,Math.max(1,matrix.length),cols).createFilter();if(name.indexOf('PO_API_')===0)sh.hideSheet();}
+let hub_poDeadlineMs_=0;
+let hub_poRetryCount_=0;
+function hub_poReadFetch_(url,options) {
+  for(let attempt=0;attempt<3;attempt++){
+    if(hub_poDeadlineMs_&&Date.now()>hub_poDeadlineMs_-5000)throw new Error('Refresh time budget reached; retry the manual refresh.');
+    Utilities.sleep(850);
+    let response;try{response=UrlFetchApp.fetch(url,options);}catch(e){throw new Error('Striven network read failed.');}
+    if(response.getResponseCode()!==429)return response;
+    hub_poRetryCount_++;
+    if(attempt===2||(hub_poDeadlineMs_&&Date.now()+65000>hub_poDeadlineMs_))throw new Error('Striven rate limit persists; prior results retained.');
+    Utilities.sleep(61000);
+  }
+  throw new Error('Striven read retry exhausted.');
+}
+function hub_poApprovedAliases_(){return {'31638':{canonical:'42950',sku:'TQ285X-RD-1-A',evidence:'Active and inactive Striven Item records both have UPC 629162133939; same product name and manufacturer SKU. Checked 2026-10-07. Manufacturer: https://www.napoleon.com/en/ca/barbecues/products/portable-grills/travelq-series/travelq-285x-tq285x-rd-1'}};}
+function hub_poAliasInventory_(iv,token,through){
+ const rows=[['Canonical Item ID','Alias Item ID','Inventory location ID','Location','On hand','Available','On SO','On PO','Evidence']];
+ const aliases=hub_poApprovedAliases_();
+ Object.keys(aliases).forEach(id=>{const d=aliases[id],canonical=iv[d.canonical];if(!canonical)throw new Error('Approved alias canonical inventory missing.');const locs=hub_extractInventoryLocationRows_(hub_fetchItemInventoryLocations_(id,Utilities.formatDate(new Date(),'America/Toronto','yyyy-MM-dd'),token));
+ if(!locs.length){canonical[4]='';canonical[5]='';canonical[6]='';canonical[11]='';canonical[10]=String(canonical[10]||'')+'; APPROVED ALIAS INVENTORY UNKNOWN';return;}
+ locs.forEach(loc=>{const onHand=hub_requiredInventoryNumber_(loc,'qtyOnHand'),available=hub_requiredInventoryNumber_(loc,'qtyAvailable'),so=hub_requiredInventoryNumber_(loc,'qtyOnSalesOrders'),po=hub_requiredInventoryNumber_(loc,'qtyOnPurchaseOrders');if(canonical[4]!=='')canonical[4]+=onHand;if(canonical[5]!=='')canonical[5]+=so;if(canonical[6]!=='')canonical[6]+=po;if(canonical[11]!=='')canonical[11]+=available;rows.push([Number(d.canonical),Number(id),hub_requiredInventoryNumber_(loc,'inventoryLocationID'),loc.inventoryLocationName||'',onHand,available,so,po,d.evidence]);});
+ });return rows;
+}
