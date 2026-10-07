@@ -1,5 +1,5 @@
 /** Google Apps Script — current snapshot calculation verification. */
-function test_RebuildCurrentPoSnapshot() { return hub_rebuildPoAnalysisFromLastSnapshot(); }
+function test_RebuildCurrentPoSnapshot() { hub_refreshPoSalesScope(); return hub_rebuildPoAnalysisFromLastSnapshot(); }
 
 /** Google Apps Script — current PO analysis release test. */
 function test_PoAnalysisRefreshAndVerify() {

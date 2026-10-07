@@ -2326,6 +2326,7 @@ function hub_refreshPoSalesScope() {
 
     const itemNumberById = hub_poSalesScopeItemNumberMap_();
     const rows = [];
+    const placeholderRows = [['PO Number','PO Line ID','Item ID','Qty ordered','Source description','Inventory location','Snapshot UTC']];
     const returnedPoNumbers = [];
 
     poRecordIds.forEach(function(poRecordId) {
@@ -2361,6 +2362,8 @@ function hub_refreshPoSalesScope() {
             'PO record ' + poRecordId + ' contains a line without Striven Item ID.'
           );
         }
+
+        if(Number(itemId)===36935)placeholderRows.push([String(po.poNumber),Number(line.id),Number(itemId),Number(line.qty||0),String(line.description||''),line.inventoryLocation?String(line.inventoryLocation.name||''):'',new Date().toISOString()]);
 
         rows.push([
           Number(po.id),
@@ -2431,6 +2434,7 @@ function hub_refreshPoSalesScope() {
     sh.autoResizeColumns(1, headers.length);
 
     hub_rebuildPoItemScope_();
+    hub_poTable_(ss,'PO_PLACEHOLDER_SOURCE',placeholderRows);
 
     const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
 
@@ -3435,6 +3439,10 @@ function hub_rebuildPoAnalysisFromLastSnapshot() {
   const cached=ss.getSheetByName('PO_API_SALES_LINES').getDataRange().getValues(),fields=cached[0],seen={};
   const sales=cached.slice(1).map(r=>{const x={};fields.forEach((k,i)=>x[k]=r[i]);if(x.TransactionTransactionDate instanceof Date)x.TransactionTransactionDate=Utilities.formatDate(x.TransactionTransactionDate,'America/Toronto','MM/dd/yyyy');const id=String(x.TransactionDetailId);if(!/^\\d+$/.test(id)||seen[id])throw new Error('Invalid cached sales identity.');seen[id]=true;hub_poDate_(x.TransactionTransactionDate);hub_poNum_(x.Qty);hub_poNum_(x.Amount);return x;});
   const scope={};ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!=='')scope[String(r[0])]=r;});
+  const orders=ss.getSheetByName('PO_API_ORDER_LINES').getDataRange().getValues(),oh=orders[0],expected={};
+  const indexes=['PurchaseOrderNumber','ItemItemId','Qty'].map(k=>oh.indexOf(k));if(indexes.some(i=>i<0))throw new Error('Cached PO contract missing.');
+  orders.slice(1).forEach(r=>{const po=String(r[indexes[0]]),j=['2739','2744','2745'].indexOf(po);if(j<0)return;const id=String(r[indexes[1]]);if(!expected[id])expected[id]=[0,0,0];expected[id][j]+=hub_poNum_(r[indexes[2]]);});
+  if(Object.keys(expected).length!==Object.keys(scope).length||Object.keys(scope).some(id=>!expected[id]||expected[id].some((q,j)=>q!==Number(scope[id][j+3]))))throw new Error('PO scope changed since the successful source cache; run live refresh.');
   const through=ss.getSheetByName('PO_SALES_SUMMARY').getRange('V2').getDisplayValue();
   if(!/^2026-\\d{2}-\\d{2}$/.test(through))throw new Error('Successful snapshot cutoff missing.');
   const iv={};ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues().slice(1).forEach(r=>{if(r[1]!=='')iv[String(r[1])]=r.slice();});
