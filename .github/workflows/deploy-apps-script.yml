@@ -1,0 +1,128 @@
+name: Deploy Central Hub to Apps Script
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "PATCH_SOURCE/**"
+      - "SCRIPT_ID.txt"
+      - ".github/workflows/deploy-apps-script.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install clasp 3.3.0
+        run: npm install --global @google/clasp@3.3.0
+
+      - name: Configure clasp auth
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON" || (echo "Missing CLASPRC_JSON secret" && exit 1)
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+          clasp show-authorized-user --json
+
+      - name: Validate package and Script ID
+        run: |
+          set -euo pipefail
+          test -f SCRIPT_ID.txt
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          test -n "$SCRIPT_ID"
+          test -d PATCH_SOURCE
+          test -f PATCH_SOURCE/00_Config.js
+          test -f PATCH_SOURCE/10_Central_Hub.js
+          test -f PATCH_SOURCE/90_Tests.js
+          test -f PATCH_SOURCE/appsscript.json
+          COUNT="$(find PATCH_SOURCE -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          test "$COUNT" = "4"
+          node --check PATCH_SOURCE/00_Config.js
+          node --check PATCH_SOURCE/10_Central_Hub.js
+          node --check PATCH_SOURCE/90_Tests.js
+          grep -q "function hub_refreshPoSalesScope()" PATCH_SOURCE/10_Central_Hub.js
+          grep -q "Refresh PO Sales Scope','hub_refreshPoSalesScope" PATCH_SOURCE/10_Central_Hub.js
+
+      - name: Pull live PRE backup
+        run: |
+          set -euo pipefail
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p PRE/src
+          cat > PRE/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+          clasp pull --project PRE
+          tar -czf PRE_APPS_SCRIPT.tar.gz -C PRE .
+
+      - name: Build deploy source
+        run: |
+          set -euo pipefail
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p WORK/src
+          cp PATCH_SOURCE/00_Config.js WORK/src/
+          cp PATCH_SOURCE/10_Central_Hub.js WORK/src/
+          cp PATCH_SOURCE/90_Tests.js WORK/src/
+          cp PATCH_SOURCE/appsscript.json WORK/src/
+          cat > WORK/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+
+      - name: Freshness check before push
+        run: |
+          set -euo pipefail
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p FRESH/src
+          cat > FRESH/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+          clasp pull --project FRESH
+          PRE_SHA="$(find PRE/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          FRESH_SHA="$(find FRESH/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          echo "PRE_SHA=$PRE_SHA"
+          echo "FRESH_SHA=$FRESH_SHA"
+          test "$PRE_SHA" = "$FRESH_SHA"
+
+      - name: Push to Apps Script
+        run: |
+          set -euo pipefail
+          clasp push --force --project WORK
+
+      - name: Pull POST and verify exact source
+        run: |
+          set -euo pipefail
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p POST/src
+          cat > POST/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+          clasp pull --project POST
+          WORK_SHA="$(find WORK/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          POST_SHA="$(find POST/src -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          echo "WORK_SHA=$WORK_SHA"
+          echo "POST_SHA=$POST_SHA"
+          test "$WORK_SHA" = "$POST_SHA"
+          grep -q "function hub_refreshPoSalesScope()" POST/src/10_Central_Hub.js
+          grep -q "Refresh PO Sales Scope','hub_refreshPoSalesScope" POST/src/10_Central_Hub.js
+
+      - name: Upload PRE backup artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-apps-script-backup
+          path: PRE_APPS_SCRIPT.tar.gz
+          if-no-files-found: ignore
+          retention-days: 14
