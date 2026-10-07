@@ -75,6 +75,7 @@ jobs:
           mkdir -p WORK/src
           cp -a PRE/src/. WORK/src/
           cp PATCH_SOURCE/10_Central_Hub.js WORK/src/10_Central_Hub.js
+          cp PATCH_SOURCE/appsscript.json WORK/src/appsscript.json
           cat > WORK/.clasp.json <<EOF
           {"scriptId":"$SCRIPT_ID","rootDir":"src"}
           EOF
@@ -107,6 +108,7 @@ jobs:
           clasp pull --project POST
           diff -qr WORK/src POST/src
           diff -q PATCH_SOURCE/10_Central_Hub.js POST/src/10_Central_Hub.js
+          diff -q PATCH_SOURCE/appsscript.json POST/src/appsscript.json
           grep -q "function hub_refreshPoSalesScope()" POST/src/10_Central_Hub.js
           grep -q "Refresh PO Sales Scope','hub_refreshPoSalesScope" POST/src/10_Central_Hub.js
 
