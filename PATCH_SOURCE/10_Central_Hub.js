@@ -12,6 +12,8 @@ function onOpen() {
     .addItem('Inventory Registered Sheet Tabs','hub_inventoryRegisteredSheetTabs')
     .addItem('Rebuild Report Registry','hub_rebuildReportRegistry')
     .addSeparator()
+    .addItem('Refresh PO Sales Scope','hub_refreshPoSalesScope')
+    .addSeparator()
     .addItem('Validate Project Registry','hub_validateProjectRegistry')
     .addItem('Add Project Source','hub_addProjectSource')
     .addToUi();
@@ -2268,3 +2270,287 @@ function hub_stdLocationsBoolean_(value) {
 }
 
 /* === HUB_STD_LOCATIONS_R1_6_END === */
+
+
+/* === HUB_PO_SALES_SCOPE_R1_BEGIN ===
+ * PO Sales Scope — manual refresh only.
+ *
+ * SAFETY:
+ * - READS only GET /v1/purchase-orders/{id} from Striven.
+ * - WRITES only the PO_SALES_SCOPE sheet plus Hub logs/API usage.
+ * - Performs no Striven POST/PUT/PATCH/DELETE operations.
+ * - Uses stable Striven Item ID as the primary item key.
+ */
+function hub_refreshPoSalesScope() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('PO Sales Scope refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const runId = 'PO_SALES_SCOPE_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  const poRecordIds = [2744, 2739, 2745];
+  let apiCalls = 0;
+
+  try {
+    hub_initializeOrRepair();
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(
+      props.getProperty('CLIENT_ID') ||
+      props.getProperty('STRIVEN_CLIENT_ID') ||
+      ''
+    ).trim();
+    const clientSecret = String(
+      props.getProperty('CLIENT_SECRET') ||
+      props.getProperty('STRIVEN_CLIENT_SECRET') ||
+      ''
+    ).trim();
+
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        'Missing CLIENT_ID/CLIENT_SECRET or STRIVEN_CLIENT_ID/STRIVEN_CLIENT_SECRET.'
+      );
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    if (tokenInfo.requestedNewToken) apiCalls++;
+
+    const itemNumberById = hub_poSalesScopeItemNumberMap_();
+    const rows = [];
+
+    poRecordIds.forEach(function(poRecordId) {
+      const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
+      apiCalls++;
+
+      if (!po || Number(po.id) !== Number(poRecordId)) {
+        throw new Error(
+          'Purchase Order response ID mismatch for requested record ' + poRecordId + '.'
+        );
+      }
+
+      const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
+      if (!lineItems.length) {
+        throw new Error(
+          'Purchase Order record ' + poRecordId + ' returned zero line items.'
+        );
+      }
+
+      lineItems.forEach(function(line) {
+        const item = line && line.item ? line.item : {};
+        const itemId = item && item.id != null ? String(item.id) : '';
+        if (!itemId) {
+          throw new Error(
+            'PO record ' + poRecordId + ' contains a line without Striven Item ID.'
+          );
+        }
+
+        rows.push([
+          Number(po.id),
+          String(po.poNumber || ''),
+          po.poDate || '',
+          po.status && po.status.name ? String(po.status.name) : '',
+          po.vendor && po.vendor.name ? String(po.vendor.name) : '',
+          line.id != null ? Number(line.id) : '',
+          Number(itemId),
+          itemNumberById[itemId] || hub_poSalesScopeItemNumberFromName_(item.name),
+          item && item.name ? String(item.name) : '',
+          Number(line.qty || 0),
+          Number(line.billedQty || 0),
+          Number(line.unitCost || 0),
+          line.inventoryLocation && line.inventoryLocation.name
+            ? String(line.inventoryLocation.name)
+            : '',
+          line.customer && line.customer.name ? String(line.customer.name) : '',
+          line.order && line.order.name ? String(line.order.name) : ''
+        ]);
+      });
+    });
+
+    if (!rows.length) {
+      throw new Error('PO Sales Scope produced zero rows; existing sheet was not replaced.');
+    }
+
+    const headers = [
+      'PO Record ID',
+      'PO Number',
+      'PO Date',
+      'PO Status',
+      'Vendor',
+      'Line ID',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Qty Ordered',
+      'Billed Qty',
+      'Unit Cost',
+      'Inventory Location',
+      'Customer',
+      'Sales Order'
+    ];
+
+    const ss = SpreadsheetApp.getActive();
+    let sh = ss.getSheetByName('PO_SALES_SCOPE');
+    if (!sh) sh = ss.insertSheet('PO_SALES_SCOPE');
+
+    sh.clearContents();
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    sh.setFrozenRows(1);
+    sh.autoResizeColumns(1, headers.length);
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_apiUsage_(
+      runId,
+      'PO_SALES_SCOPE',
+      '/v1/purchase-orders/{id}',
+      'GET',
+      apiCalls,
+      rows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshPoSalesScope'
+    );
+
+    hub_log_(
+      'INFO',
+      'PO_SALES_SCOPE',
+      '2744,2739,2745',
+      'PO Sales Scope refreshed.',
+      JSON.stringify({
+        poRecordIds: poRecordIds,
+        rows: rows.length,
+        apiCalls: apiCalls,
+        tokenRequestMade: tokenInfo.requestedNewToken,
+        durationSec: durationSec,
+        strivenWritesPerformed: false
+      })
+    );
+
+    ss.toast(
+      'PO Sales Scope ready: ' + rows.length + ' item lines.',
+      'Central Hub',
+      8
+    );
+
+    return {
+      status: 'PASS',
+      poRecordIds: poRecordIds,
+      rows: rows.length,
+      apiCalls: apiCalls,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      targetSheet: 'PO_SALES_SCOPE',
+      strivenWritesPerformed: false
+    };
+  } catch (err) {
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const safeError = hub_safeExternalText_(
+      String(err && err.message || err),
+      1000
+    );
+
+    try {
+      hub_apiUsage_(
+        runId,
+        'PO_SALES_SCOPE',
+        '/v1/purchase-orders/{id}',
+        'GET',
+        apiCalls,
+        0,
+        durationSec,
+        'FAILED',
+        safeError,
+        'hub_refreshPoSalesScope'
+      );
+      hub_log_(
+        'ERROR',
+        'PO_SALES_SCOPE',
+        '2744,2739,2745',
+        'PO Sales Scope refresh failed; existing sheet retained when possible.',
+        safeError
+      );
+    } catch (loggingErr) {}
+
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_fetchPurchaseOrder_(poRecordId, token) {
+  const url =
+    'https://api.striven.com/v1/purchase-orders/' +
+    encodeURIComponent(String(poRecordId));
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Purchase Order ' + poRecordId + ' fetch failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      'Purchase Order ' + poRecordId + ' returned non-JSON content.'
+    );
+  }
+}
+
+function hub_poSalesScopeItemNumberMap_() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName('DATA_ITEMS');
+  if (!sh || sh.getLastRow() < 2) return {};
+
+  const values = sh.getDataRange().getValues();
+  const headers = values[0].map(function(v) { return String(v).trim(); });
+  const idCol = headers.indexOf('Id');
+  const numberCol = headers.indexOf('ItemNumber');
+
+  if (idCol < 0 || numberCol < 0) return {};
+
+  const map = {};
+  for (let i = 1; i < values.length; i++) {
+    const id = String(values[i][idCol] == null ? '' : values[i][idCol]).trim();
+    const number = String(
+      values[i][numberCol] == null ? '' : values[i][numberCol]
+    ).trim();
+    if (id && number && !map[id]) map[id] = number;
+  }
+  return map;
+}
+
+function hub_poSalesScopeItemNumberFromName_(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return '';
+  const m = s.match(/^([^\s]+)\s+-\s+/);
+  return m ? m[1] : '';
+}
+
+/* === HUB_PO_SALES_SCOPE_R1_END === */
