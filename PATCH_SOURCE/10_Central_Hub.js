@@ -3392,3 +3392,24 @@ function hub_collectPoReturnEvidence() {
     Logger.log(JSON.stringify(out));return out;
   }finally{lock.releaseLock();}
 }
+
+/** Google Apps Script — inspect source changes without replacing the accepted scope. */
+function hub_inspectPoScopeChanges() {
+ const ss=SpreadsheetApp.getActive(),lock=LockService.getDocumentLock();
+ if(!lock.tryLock(10000))throw new Error('PO operation already running.');
+ try {
+  const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG'),props=PropertiesService.getScriptProperties(),token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID'),props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
+  hub_poDeadlineMs_=Date.now()+120000;hub_poRetryCount_=0;
+  const pos=hub_poFeed_(String(cfg.getRange('B3').getValue()).trim(),token,'PurchaseOrderDetailId'),current={};
+  const detail=pos.filter(r=>['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))>=0);
+  detail.forEach(r=>{const id=String(r.ItemItemId);if(!current[id])current[id]=[r.ItemNumber,0,0,0];current[id][1+['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))]+=hub_poNum_(r.Qty);});
+  const prior={},rows=[['Item ID','SKU','Old PO2739 qty','New PO2739 qty','Old PO2744 qty','New PO2744 qty','Old PO2745 qty','New PO2745 qty','Change']];
+  ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!=='')prior[String(r[0])]=[r[1],Number(r[3]),Number(r[4]),Number(r[5])];});
+  [...new Set(Object.keys(prior).concat(Object.keys(current)))].forEach(id=>{const a=prior[id]||['',0,0,0],b=current[id]||['',0,0,0];if(!prior[id]||!current[id]||a.slice(1).some((n,j)=>n!==b[j+1]))rows.push([Number(id),b[0]||a[0],a[1],b[1],a[2],b[2],a[3],b[3],!prior[id]?'NEW ITEM':!current[id]?'REMOVED ITEM':'ORDERED QUANTITY CHANGED']);});
+  const fields=['PurchaseOrderNumber','ItemSalesOrderNumber','ItemSalesOrderName','ItemCustomerNumber','ItemCustomerName','ItemNumber','ItemName','Qty','UnitCost','Amount','QtyBilled','BilledTotal','PurchaseOrderDetailId','ItemItemId','PurchaseOrderPurchaseOrderId'];
+  hub_poTable_(ss,'PO_SCOPE_SOURCE',[fields].concat(detail.map(r=>fields.map(k=>r[k]==null?'':r[k]))));
+  hub_poTable_(ss,'PO_SCOPE_CHANGES',rows);
+  const out={status:'SCOPE_INSPECTED',poRows:pos.length,selectedLines:detail.length,items:Object.keys(current).length,ordered:detail.reduce((n,r)=>n+hub_poNum_(r.Qty),0),changes:rows.length-1};
+  Logger.log(JSON.stringify(out));return out;
+ }finally{lock.releaseLock();}
+}
