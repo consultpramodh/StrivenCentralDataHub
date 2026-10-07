@@ -13,6 +13,7 @@ function onOpen() {
     .addItem('Rebuild Report Registry','hub_rebuildReportRegistry')
     .addSeparator()
     .addItem('Refresh PO Sales Scope','hub_refreshPoSalesScope')
+    .addItem('Refresh PO Inventory Scope','hub_refreshPoInventoryScope')
     .addSeparator()
     .addItem('Validate Project Registry','hub_validateProjectRegistry')
     .addItem('Add Project Source','hub_addProjectSource')
@@ -2689,3 +2690,374 @@ function hub_rebuildPoItemScope_() {
 }
 
 /* === HUB_PO_SALES_SCOPE_R1_END === */
+
+/* === HUB_PO_INVENTORY_SCOPE_R1_BEGIN === */
+function hub_refreshPoInventoryScope() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('PO Inventory Scope refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const asOfDate = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyy-MM-dd'
+  );
+  const runId = 'PO_INVENTORY_SCOPE_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let apiCalls = 0;
+
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) {
+      throw new Error('PO_ITEM_SCOPE is missing or empty. Refresh PO Sales Scope first.');
+    }
+
+    const values = scope.getDataRange().getValues();
+    const headers = values[0].map(function(v) { return String(v).trim(); });
+    const idCol = headers.indexOf('Item ID');
+    const numberCol = headers.indexOf('Item Number');
+    const nameCol = headers.indexOf('Item Name');
+
+    if (idCol < 0 || numberCol < 0 || nameCol < 0) {
+      throw new Error('PO_ITEM_SCOPE schema is missing Item ID / Item Number / Item Name.');
+    }
+
+    const items = values.slice(1)
+      .filter(function(r) { return r[idCol] !== '' && r[idCol] != null; })
+      .map(function(r) {
+        return {
+          itemId: Number(r[idCol]),
+          itemNumber: String(r[numberCol] == null ? '' : r[numberCol]).trim(),
+          itemName: String(r[nameCol] == null ? '' : r[nameCol]).trim()
+        };
+      });
+
+    if (!items.length) throw new Error('PO_ITEM_SCOPE contains zero Item IDs.');
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(
+      props.getProperty('CLIENT_ID') ||
+      props.getProperty('STRIVEN_CLIENT_ID') ||
+      ''
+    ).trim();
+    const clientSecret = String(
+      props.getProperty('CLIENT_SECRET') ||
+      props.getProperty('STRIVEN_CLIENT_SECRET') ||
+      ''
+    ).trim();
+
+    if (!clientId || !clientSecret) {
+      throw new Error('Missing Striven API credentials.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    if (tokenInfo.requestedNewToken) apiCalls++;
+
+    const detailRows = [];
+    const summaryByItem = {};
+    const exceptions = [];
+
+    items.forEach(function(item) {
+      const result = hub_fetchItemInventoryLocations_(
+        item.itemId,
+        asOfDate,
+        tokenInfo.accessToken
+      );
+      apiCalls++;
+
+      const locations = hub_extractInventoryLocationRows_(result);
+
+      if (!locations.length) {
+        summaryByItem[item.itemId] = {
+          itemId: item.itemId,
+          itemNumber: item.itemNumber,
+          itemName: item.itemName,
+          qtyOnHand: 0,
+          qtyOnSO: 0,
+          qtyOnPO: 0,
+          qtyOnBuild: 0,
+          locationCount: 0,
+          exception: 'NO INVENTORY LOCATION ROWS RETURNED'
+        };
+        exceptions.push(item.itemId);
+        return;
+      }
+
+      const sum = {
+        itemId: item.itemId,
+        itemNumber: item.itemNumber,
+        itemName: item.itemName,
+        qtyOnHand: 0,
+        qtyOnSO: 0,
+        qtyOnPO: 0,
+        qtyOnBuild: 0,
+        locationCount: 0,
+        exception: ''
+      };
+
+      locations.forEach(function(loc) {
+        const locationId = hub_pickInventoryField_(loc, [
+          'locationId','LocationId','inventoryLocationId','InventoryLocationId','id','Id'
+        ], '');
+        const locationName = hub_inventoryLocationName_(loc);
+
+        const qtyOnHand = hub_numberOrZero_(hub_pickInventoryField_(loc, [
+          'qtyOnHand','QtyOnHand','quantityOnHand','QuantityOnHand'
+        ], 0));
+        const qtyOnSO = hub_numberOrZero_(hub_pickInventoryField_(loc, [
+          'qtyOnSO','QtyOnSO','quantityOnSO','QuantityOnSO'
+        ], 0));
+        const qtyOnPO = hub_numberOrZero_(hub_pickInventoryField_(loc, [
+          'qtyOnPO','QtyOnPO','quantityOnPO','QuantityOnPO'
+        ], 0));
+        const qtyOnBuild = hub_numberOrZero_(hub_pickInventoryField_(loc, [
+          'qtyOnBuild','QtyOnBuild','quantityOnBuild','QuantityOnBuild'
+        ], 0));
+
+        detailRows.push([
+          asOfDate,
+          item.itemId,
+          item.itemNumber,
+          item.itemName,
+          locationId,
+          locationName,
+          qtyOnHand,
+          qtyOnSO,
+          qtyOnPO,
+          qtyOnBuild,
+          qtyOnHand - qtyOnSO
+        ]);
+
+        sum.qtyOnHand += qtyOnHand;
+        sum.qtyOnSO += qtyOnSO;
+        sum.qtyOnPO += qtyOnPO;
+        sum.qtyOnBuild += qtyOnBuild;
+        sum.locationCount++;
+      });
+
+      summaryByItem[item.itemId] = sum;
+    });
+
+    const detailHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Location ID',
+      'Location',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Build',
+      'Available Calc (On Hand - On SO)'
+    ];
+
+    const summaryHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Build',
+      'Available Calc (On Hand - On SO)',
+      'Inventory Location Count',
+      'Exception'
+    ];
+
+    const summaryRows = items.map(function(item) {
+      const x = summaryByItem[item.itemId] || {
+        itemId:item.itemId,
+        itemNumber:item.itemNumber,
+        itemName:item.itemName,
+        qtyOnHand:0,qtyOnSO:0,qtyOnPO:0,qtyOnBuild:0,locationCount:0,
+        exception:'NO SUMMARY'
+      };
+      return [
+        asOfDate,
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.qtyOnHand,
+        x.qtyOnSO,
+        x.qtyOnPO,
+        x.qtyOnBuild,
+        x.qtyOnHand - x.qtyOnSO,
+        x.locationCount,
+        x.exception
+      ];
+    });
+
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SCOPE', detailHeaders, detailRows);
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SUMMARY', summaryHeaders, summaryRows);
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_apiUsage_(
+      runId,
+      'PO_INVENTORY_SCOPE',
+      '/v1/items/{itemId}/inventory-locations?asofDate=' + asOfDate,
+      'GET',
+      apiCalls,
+      detailRows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshPoInventoryScope'
+    );
+
+    hub_log_(
+      'INFO',
+      'PO_INVENTORY_SCOPE',
+      String(items.length),
+      'Scoped inventory refreshed for PO item universe.',
+      JSON.stringify({
+        asOfDate: asOfDate,
+        scopedItems: items.length,
+        detailRows: detailRows.length,
+        summaryRows: summaryRows.length,
+        exceptions: exceptions.length,
+        apiCalls: apiCalls,
+        tokenRequestMade: tokenInfo.requestedNewToken,
+        strivenWritesPerformed: false
+      })
+    );
+
+    ss.toast(
+      'PO inventory ready: ' + items.length + ' items, ' +
+      detailRows.length + ' location rows.',
+      'Central Hub',
+      8
+    );
+
+    return {
+      status: 'PASS',
+      asOfDate: asOfDate,
+      scopedItems: items.length,
+      detailRows: detailRows.length,
+      summaryRows: summaryRows.length,
+      exceptions: exceptions,
+      apiCalls: apiCalls,
+      strivenWritesPerformed: false
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_fetchItemInventoryLocations_(itemId, asOfDate, token) {
+  const url =
+    'https://api.striven.com/v1/items/' +
+    encodeURIComponent(String(itemId)) +
+    '/inventory-locations?asofDate=' +
+    encodeURIComponent(String(asOfDate));
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Inventory locations fetch failed for Item ID ' + itemId +
+      ' HTTP ' + code + ': ' + hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(
+      'Inventory locations returned non-JSON for Item ID ' + itemId + '.'
+    );
+  }
+}
+
+function hub_extractInventoryLocationRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.locations, payload.Locations,
+    payload.inventoryLocations, payload.InventoryLocations
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  return [];
+}
+
+function hub_pickInventoryField_(obj, keys, fallback) {
+  if (!obj || typeof obj !== 'object') return fallback;
+  for (let i = 0; i < keys.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(obj, keys[i])) {
+      const v = obj[keys[i]];
+      if (v !== null && v !== undefined && v !== '') return v;
+    }
+  }
+  return fallback;
+}
+
+function hub_inventoryLocationName_(loc) {
+  const direct = hub_pickInventoryField_(loc, [
+    'locationName','LocationName','inventoryLocationName','InventoryLocationName','name','Name'
+  ], '');
+  if (direct) return String(direct);
+
+  const nested = loc && (
+    loc.location || loc.Location ||
+    loc.inventoryLocation || loc.InventoryLocation
+  );
+  if (nested && typeof nested === 'object') {
+    return String(
+      nested.name || nested.Name || nested.locationName || nested.LocationName || ''
+    );
+  }
+  return '';
+}
+
+function hub_numberOrZero_(value) {
+  const n = Number(value);
+  return isFinite(n) ? n : 0;
+}
+
+function hub_writeTableSheet_(ss, sheetName, headers, rows) {
+  let sh = ss.getSheetByName(sheetName);
+  if (!sh) sh = ss.insertSheet(sheetName);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows.length) {
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, headers.length);
+}
+/* === HUB_PO_INVENTORY_SCOPE_R1_END === */
+
+
