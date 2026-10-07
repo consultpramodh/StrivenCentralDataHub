@@ -1674,3 +1674,551 @@ function obHtml_(value) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/**
+ * ---------------------------------------------------------------------------
+ * CONTROLLED TEST ONLY — 10-minute / 3-run email trial
+ * ---------------------------------------------------------------------------
+ * This path is intentionally isolated from production Sales Rep routing.
+ *
+ * Test-only ownership:
+ * - Uses Striven report CreatedBy solely to reproduce the user's controlled
+ *   employee/location test.
+ * - CreatedBy MUST NOT be reused by production distribution.
+ *
+ * Delivery safety:
+ * - Hard-coded single recipient: pramodh@classicfireplace.ca
+ * - No CC/BCC.
+ * - No attachment.
+ * - Grouped locations remain one email, but each employee gets a separate
+ *   summary, A/R aging section, and transaction table.
+ * - No Net Open Balance / Net Deposits.
+ * - No totals row at the bottom of transaction tables.
+ * - Trigger removes itself after 3 attempted executions.
+ */
+const OB_CONTROLLED_TEST_10M = Object.freeze({
+  TRIGGER_FUNCTION: "runOpenBalanceControlledTest10Min",
+  COUNT_PROPERTY: "OB_CONTROLLED_TEST_10M_RUN_COUNT",
+  RECIPIENT: "pramodh@classicfireplace.ca",
+  INTERVAL_MINUTES: 10,
+  MAX_RUNS: 3,
+  GROUPS: Object.freeze([
+    Object.freeze({
+      label: "Steve Trevor + Colleen Trevor",
+      members: Object.freeze(["Steve Trevor", "Colleen Trevor"])
+    }),
+    Object.freeze({
+      label: "Matthew McLean + Karen Genis",
+      members: Object.freeze(["Matthew McLean", "Karen Genis"])
+    }),
+    Object.freeze({
+      label: "Spencer Bambek + Doug Crann",
+      members: Object.freeze(["Spencer Bambek", "Doug Crann"])
+    }),
+    Object.freeze({
+      label: "Trevor Burke + Karen Goldman + Clara Lam",
+      members: Object.freeze(["Trevor Burke", "Karen Goldman", "Clara Lam"])
+    })
+  ])
+});
+
+/**
+ * Run this ONCE from the bound Apps Script project to start the test.
+ * The first trigger execution occurs on Apps Script's 10-minute cadence.
+ */
+function installOpenBalanceControlledTest10Min3Runs() {
+  if (!obGetReportUrl_()) {
+    throw new Error("Controlled test not installed: Striven Open Balance report URL is missing.");
+  }
+
+  obDeleteControlledTest10MinTriggers_();
+
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(OB_CONTROLLED_TEST_10M.COUNT_PROPERTY, "0");
+
+  const trigger = ScriptApp.newTrigger(OB_CONTROLLED_TEST_10M.TRIGGER_FUNCTION)
+    .timeBased()
+    .everyMinutes(OB_CONTROLLED_TEST_10M.INTERVAL_MINUTES)
+    .create();
+
+  const result = {
+    ok: true,
+    status: "CONTROLLED_TEST_SCHEDULED",
+    recipient: OB_CONTROLLED_TEST_10M.RECIPIENT,
+    intervalMinutes: OB_CONTROLLED_TEST_10M.INTERVAL_MINUTES,
+    maxRuns: OB_CONTROLLED_TEST_10M.MAX_RUNS,
+    completedRuns: 0,
+    triggerId: trigger.getUniqueId()
+  };
+
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Trigger handler. Fetches a fresh Striven report on every run, builds all
+ * messages in memory, then sends the controlled-test email set only to the
+ * hard-coded admin recipient.
+ */
+function runOpenBalanceControlledTest10Min() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return { ok: false, status: "SKIPPED_LOCKED" };
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  let runNumber = Number(props.getProperty(OB_CONTROLLED_TEST_10M.COUNT_PROPERTY) || "0") + 1;
+
+  try {
+    if (runNumber > OB_CONTROLLED_TEST_10M.MAX_RUNS) {
+      const removed = obDeleteControlledTest10MinTriggers_();
+      return {
+        ok: true,
+        status: "CONTROLLED_TEST_ALREADY_COMPLETE",
+        completedRuns: OB_CONTROLLED_TEST_10M.MAX_RUNS,
+        removedTriggers: removed
+      };
+    }
+
+    // Count the trigger attempt before any mail is sent so this trial can
+    // never continue indefinitely after a downstream error.
+    props.setProperty(OB_CONTROLLED_TEST_10M.COUNT_PROPERTY, String(runNumber));
+
+    const report = obFetchReport_();
+    if (!report || !Array.isArray(report.rows) || !report.rows.length) {
+      throw new Error("Controlled test stopped: Striven Open Balance report returned no rows.");
+    }
+
+    const createdByField = obFindField_(report.fields || [], "CreatedBy");
+    if (!createdByField) {
+      throw new Error("Controlled test stopped: CreatedBy is missing from the Striven report.");
+    }
+
+    const normalizedRows = report.rows.map(function(row) {
+      const copy = Object.assign({}, row);
+      copy.__controlledTestCreatedBy = String(row[createdByField] == null ? "" : row[createdByField]).trim();
+      return copy;
+    });
+
+    const missingOwner = normalizedRows.filter(function(row) {
+      return !row.__controlledTestCreatedBy;
+    });
+
+    if (missingOwner.length) {
+      throw new Error(
+        "Controlled test stopped: " + missingOwner.length +
+        " source row(s) have blank CreatedBy. No emails were sent."
+      );
+    }
+
+    const messages = obBuildControlledTest10MinMessages_(normalizedRows, runNumber);
+    const accountedRows = messages.reduce(function(sum, message) {
+      return sum + message.rowCount;
+    }, 0);
+
+    if (accountedRows !== normalizedRows.length) {
+      throw new Error(
+        "Controlled test privacy/count stop: " + accountedRows +
+        " grouped rows do not equal " + normalizedRows.length + " source rows."
+      );
+    }
+
+    const sent = [];
+    messages.forEach(function(message) {
+      MailApp.sendEmail({
+        to: OB_CONTROLLED_TEST_10M.RECIPIENT,
+        subject: message.subject,
+        body: message.textBody,
+        htmlBody: message.htmlBody,
+        name: OB.SENDER_NAME
+      });
+
+      sent.push({
+        label: message.label,
+        rows: message.rowCount
+      });
+    });
+
+    const result = {
+      ok: true,
+      status: runNumber >= OB_CONTROLLED_TEST_10M.MAX_RUNS
+        ? "CONTROLLED_TEST_COMPLETE"
+        : "CONTROLLED_TEST_SENT",
+      runNumber: runNumber,
+      maxRuns: OB_CONTROLLED_TEST_10M.MAX_RUNS,
+      recipient: OB_CONTROLLED_TEST_10M.RECIPIENT,
+      sourceRows: normalizedRows.length,
+      emailsSent: sent.length,
+      groups: sent
+    };
+
+    console.log(JSON.stringify(result));
+    return result;
+  } catch (err) {
+    console.error(JSON.stringify({
+      ok: false,
+      status: "CONTROLLED_TEST_FAILED",
+      runNumber: runNumber,
+      maxRuns: OB_CONTROLLED_TEST_10M.MAX_RUNS,
+      recipient: OB_CONTROLLED_TEST_10M.RECIPIENT,
+      error: String(err && err.message ? err.message : err)
+    }));
+    throw err;
+  } finally {
+    if (runNumber >= OB_CONTROLLED_TEST_10M.MAX_RUNS) {
+      obDeleteControlledTest10MinTriggers_();
+    }
+    lock.releaseLock();
+  }
+}
+
+/** Manual emergency stop for the 10-minute controlled test. */
+function removeOpenBalanceControlledTest10Min3Runs() {
+  const removed = obDeleteControlledTest10MinTriggers_();
+  const props = PropertiesService.getScriptProperties();
+  const completedRuns = Number(props.getProperty(OB_CONTROLLED_TEST_10M.COUNT_PROPERTY) || "0");
+  return {
+    ok: true,
+    status: "CONTROLLED_TEST_STOPPED",
+    removedTriggers: removed,
+    completedRuns: completedRuns
+  };
+}
+
+/** Read-only status helper for the controlled test. */
+function openBalanceControlledTest10MinStatus() {
+  const props = PropertiesService.getScriptProperties();
+  const completedRuns = Number(props.getProperty(OB_CONTROLLED_TEST_10M.COUNT_PROPERTY) || "0");
+  const triggerCount = ScriptApp.getProjectTriggers().filter(function(trigger) {
+    return trigger.getHandlerFunction() === OB_CONTROLLED_TEST_10M.TRIGGER_FUNCTION;
+  }).length;
+
+  return {
+    recipient: OB_CONTROLLED_TEST_10M.RECIPIENT,
+    intervalMinutes: OB_CONTROLLED_TEST_10M.INTERVAL_MINUTES,
+    maxRuns: OB_CONTROLLED_TEST_10M.MAX_RUNS,
+    completedRuns: completedRuns,
+    remainingRuns: Math.max(0, OB_CONTROLLED_TEST_10M.MAX_RUNS - completedRuns),
+    triggerCount: triggerCount,
+    active: triggerCount > 0 && completedRuns < OB_CONTROLLED_TEST_10M.MAX_RUNS
+  };
+}
+
+function obDeleteControlledTest10MinTriggers_() {
+  let count = 0;
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === OB_CONTROLLED_TEST_10M.TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+      count++;
+    }
+  });
+  return count;
+}
+
+function obBuildControlledTest10MinMessages_(rows, runNumber) {
+  const byEmployee = Object.create(null);
+
+  rows.forEach(function(row) {
+    const employee = String(row.__controlledTestCreatedBy || "").trim();
+    if (!byEmployee[employee]) byEmployee[employee] = [];
+    byEmployee[employee].push(row);
+  });
+
+  const used = Object.create(null);
+  const specs = [];
+
+  OB_CONTROLLED_TEST_10M.GROUPS.forEach(function(group) {
+    let rowCount = 0;
+    group.members.forEach(function(name) {
+      used[name] = true;
+      rowCount += (byEmployee[name] || []).length;
+    });
+
+    if (rowCount > 0) {
+      specs.push({
+        label: group.label,
+        members: group.members.slice(),
+        rowCount: rowCount
+      });
+    }
+  });
+
+  Object.keys(byEmployee).sort().forEach(function(employee) {
+    if (used[employee]) return;
+    specs.push({
+      label: employee,
+      members: [employee],
+      rowCount: byEmployee[employee].length
+    });
+  });
+
+  const timezone = "America/Toronto";
+  const reportDate = Utilities.formatDate(new Date(), timezone, "MMM d, yyyy");
+
+  return specs.map(function(spec) {
+    return {
+      label: spec.label,
+      rowCount: spec.rowCount,
+      subject:
+        "[CONTROLLED TEST " + runNumber + "/" + OB_CONTROLLED_TEST_10M.MAX_RUNS + "] " +
+        "A/R Open Balance - " + spec.label + " - " + reportDate,
+      htmlBody: obBuildControlledTest10MinHtml_(
+        spec.label,
+        spec.members,
+        byEmployee,
+        runNumber,
+        timezone
+      ),
+      textBody: obBuildControlledTest10MinText_(
+        spec.label,
+        spec.members,
+        byEmployee,
+        runNumber,
+        timezone
+      )
+    };
+  });
+}
+
+function obBuildControlledTest10MinHtml_(label, members, byEmployee, runNumber, timezone) {
+  const reportDate = Utilities.formatDate(new Date(), timezone, "MMMM d, yyyy");
+  const sections = members.map(function(employee) {
+    return obBuildControlledTestEmployeeHtml_(employee, byEmployee[employee] || [], timezone);
+  }).join("");
+
+  return "" +
+    "<div style='font-family:Arial,Helvetica,sans-serif;color:#272727;max-width:1040px;margin:auto'>" +
+      "<div style='background:#fff7e8;border-left:4px solid #b56b32;padding:12px;margin-bottom:14px;font-size:12px;line-height:1.5'>" +
+        "<strong>CONTROLLED TEST " + runNumber + "/" + OB_CONTROLLED_TEST_10M.MAX_RUNS + "</strong><br>" +
+        "Email group: <strong>" + obHtml_(label) + "</strong><br>" +
+        "Delivered only to " + obHtml_(OB_CONTROLLED_TEST_10M.RECIPIENT) + "." +
+      "</div>" +
+      "<div style='background:#272727;color:#fff;padding:22px;border-bottom:5px solid #a44932'>" +
+        "<div style='font-size:12px;color:#d8d4cd;text-transform:uppercase;letter-spacing:1px'>Classic Fireplace &amp; BBQ Store</div>" +
+        "<div style='font-size:25px;font-weight:600;margin-top:5px'>A/R — Open Balance Report</div>" +
+      "</div>" +
+      "<div style='padding:24px;border:1px solid #dedbd5;background:#fff'>" +
+        "<p style='margin-top:0'>Current open transactions as of <strong>" + obHtml_(reportDate) + "</strong>.</p>" +
+        (members.length > 1
+          ? "<p style='font-size:13px;color:#666'>Employees are grouped into one email for this location, but each employee remains in a separate table.</p>"
+          : "") +
+        sections +
+        "<div style='font-size:10px;color:#777;margin:16px 0'>" +
+          "<em>Controlled test: A/R Aging is calculated from Invoice Date. Production aging must use Striven Due Date once that field is enriched.</em>" +
+        "</div>" +
+        "<p>Please review the transactions above for any Open Balance or Open Payments that require follow-up.</p>" +
+        "<p>Regards,<br><strong>Classic Fireplace &amp; BBQ Store</strong><br>Accounts Receivable</p>" +
+      "</div>" +
+      "<div style='font-size:10px;color:#888;text-align:center;padding:12px'>" +
+        "<strong>Confidential</strong> — Controlled test. Delivered only to the admin test recipient." +
+      "</div>" +
+    "</div>";
+}
+
+function obBuildControlledTestEmployeeHtml_(employee, rows, timezone) {
+  if (!rows.length) {
+    return "" +
+      "<div style='margin:28px 0 34px'>" +
+        "<div style='font-size:19px;font-weight:700;border-bottom:3px solid #a44932;padding-bottom:7px;margin-bottom:12px'>" +
+          obHtml_(employee) +
+        "</div>" +
+        "<div style='padding:16px;border:1px solid #dedbd5;background:#faf9f7;color:#777'>" +
+          "No open transactions in this report." +
+        "</div>" +
+      "</div>";
+  }
+
+  const sorted = rows.slice().sort(function(a, b) {
+    const aDate = obParseDate_(a.TransactionDate);
+    const bDate = obParseDate_(b.TransactionDate);
+    const aTime = aDate ? aDate.getTime() : 0;
+    const bTime = bDate ? bDate.getTime() : 0;
+    if (aTime !== bTime) return bTime - aTime;
+    return String(a.CustomerName || "").localeCompare(String(b.CustomerName || ""));
+  });
+
+  const summary = obBuildControlledTestEmployeeSummary_(sorted);
+  const aging = obBuildControlledTestInvoiceDateAging_(sorted, timezone);
+
+  const transactionRows = sorted.map(function(row, index) {
+    const customerNumber = String(row.CustomerNumber == null ? "" : row.CustomerNumber);
+    const customerUrl =
+      "https://classicfireplace.striven.com/CRM/AccountDashboard.aspx?AccountID=" +
+      encodeURIComponent(customerNumber);
+    const bg = index % 2 === 0 ? "#ffffff" : "#faf9f7";
+
+    return "" +
+      "<tr style='background:" + bg + "'>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;white-space:nowrap'>" +
+          "<a href='" + customerUrl + "' style='color:#7b3f2e;text-decoration:underline;font-weight:600'>" +
+            obHtml_(customerNumber) +
+          "</a>" +
+        "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df'>" + obHtml_(row.CustomerName) + "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;white-space:nowrap'>" + obHtml_(row.TransactionType) + "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;white-space:nowrap'>" + obHtml_(row.TransactionNumber) + "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;white-space:nowrap'>" + obHtml_(row.TransactionDate) + "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;text-align:right;white-space:nowrap'>" +
+          obMoney_(row.TransactionAmount) +
+        "</td>" +
+        "<td style='padding:7px;border-bottom:1px solid #e8e5df;text-align:right;white-space:nowrap;font-weight:600'>" +
+          obMoney_(row.OpenBalance) +
+        "</td>" +
+      "</tr>";
+  }).join("");
+
+  return "" +
+    "<div style='margin:28px 0 34px'>" +
+      "<div style='font-size:19px;font-weight:700;border-bottom:3px solid #a44932;padding-bottom:7px;margin-bottom:12px'>" +
+        obHtml_(employee) +
+      "</div>" +
+      "<table cellpadding='0' cellspacing='0' style='width:100%;border-collapse:collapse;margin-bottom:12px'>" +
+        "<tr>" +
+          "<td style='padding:12px;background:#f7f3ee;border:1px solid #ddd'>" +
+            "<div style='font-size:10px;color:#777;text-transform:uppercase'>Open Balance</div>" +
+            "<div style='font-size:20px;font-weight:bold'>" + obMoney_(summary.openBalance) + "</div>" +
+            "<div style='font-size:11px;color:#777'>" + summary.invoiceCount + " Invoices</div>" +
+          "</td>" +
+          "<td style='padding:12px;background:#f4f2ee;border:1px solid #ddd'>" +
+            "<div style='font-size:10px;color:#777;text-transform:uppercase'>Open Payments</div>" +
+            "<div style='font-size:20px;font-weight:bold'>" + obMoney_(summary.openPayments) + "</div>" +
+            "<div style='font-size:11px;color:#777'>" + summary.paymentCount + " Payments</div>" +
+          "</td>" +
+          "<td style='padding:12px;background:#f7f3ee;border:1px solid #ddd'>" +
+            "<div style='font-size:10px;color:#777;text-transform:uppercase'>Transactions</div>" +
+            "<div style='font-size:20px;font-weight:bold'>" + sorted.length + "</div>" +
+          "</td>" +
+        "</tr>" +
+      "</table>" +
+      "<div style='font-size:10px;font-weight:bold;color:#555;text-transform:uppercase;margin-bottom:6px'>A/R Aging</div>" +
+      "<table cellpadding='0' cellspacing='0' style='width:100%;border-collapse:collapse;text-align:center;font-size:11px;margin-bottom:12px'>" +
+        "<tr>" +
+          obControlledTestAgingCell_("Current", aging.current) +
+          obControlledTestAgingCell_("1–30 Days", aging.days1to30) +
+          obControlledTestAgingCell_("31–60 Days", aging.days31to60) +
+          obControlledTestAgingCell_("61–89 Days", aging.days61to89) +
+          obControlledTestAgingCell_("90+ Days", aging.days90plus) +
+        "</tr>" +
+      "</table>" +
+      "<table cellpadding='0' cellspacing='0' style='width:100%;border-collapse:collapse;font-size:10.5px'>" +
+        "<thead><tr style='background:#272727;color:#fff'>" +
+          "<th style='padding:8px;text-align:left'>Customer #</th>" +
+          "<th style='padding:8px;text-align:left'>Customer</th>" +
+          "<th style='padding:8px;text-align:left'>Type</th>" +
+          "<th style='padding:8px;text-align:left'>Transaction #</th>" +
+          "<th style='padding:8px;text-align:left'>Date</th>" +
+          "<th style='padding:8px;text-align:right'>Transaction Amount</th>" +
+          "<th style='padding:8px;text-align:right'>Open Balance</th>" +
+        "</tr></thead>" +
+        "<tbody>" + transactionRows + "</tbody>" +
+      "</table>" +
+    "</div>";
+}
+
+function obControlledTestAgingCell_(label, amount) {
+  return "" +
+    "<td style='padding:8px;border:1px solid #ddd'>" +
+      obHtml_(label) + "<br><b>" + obMoney_(amount) + "</b>" +
+    "</td>";
+}
+
+function obBuildControlledTestEmployeeSummary_(rows) {
+  let invoiceCount = 0;
+  let paymentCount = 0;
+  let openBalance = 0;
+  let openPayments = 0;
+
+  rows.forEach(function(row) {
+    const type = String(row.TransactionType || "").trim().toUpperCase();
+    const open = obToNumber_(row.OpenBalance);
+
+    if (type === "INVOICE") {
+      invoiceCount++;
+      if (open > 0) openBalance += open;
+      return;
+    }
+
+    if (type === "PAYMENT") {
+      paymentCount++;
+      openPayments += open;
+    }
+  });
+
+  return {
+    invoiceCount: invoiceCount,
+    paymentCount: paymentCount,
+    openBalance: openBalance,
+    openPayments: openPayments
+  };
+}
+
+function obBuildControlledTestInvoiceDateAging_(rows, timezone) {
+  const todayText = Utilities.formatDate(new Date(), String(timezone || "America/Toronto"), "yyyy-MM-dd");
+  const today = new Date(todayText + "T00:00:00");
+  const out = {
+    current: 0,
+    days1to30: 0,
+    days31to60: 0,
+    days61to89: 0,
+    days90plus: 0
+  };
+
+  rows.forEach(function(row) {
+    if (String(row.TransactionType || "").trim().toUpperCase() !== "INVOICE") return;
+
+    const open = obToNumber_(row.OpenBalance);
+    if (open <= 0) return;
+
+    const invoiceDate = obParseDate_(row.TransactionDate);
+    if (!invoiceDate) return;
+
+    const ageDays = Math.floor((today.getTime() - invoiceDate.getTime()) / 86400000);
+
+    if (ageDays <= 0) out.current += open;
+    else if (ageDays <= 30) out.days1to30 += open;
+    else if (ageDays <= 60) out.days31to60 += open;
+    else if (ageDays < 90) out.days61to89 += open;
+    else out.days90plus += open;
+  });
+
+  return out;
+}
+
+function obBuildControlledTest10MinText_(label, members, byEmployee, runNumber, timezone) {
+  const reportDate = Utilities.formatDate(new Date(), timezone, "MMMM d, yyyy");
+  const lines = [
+    "CONTROLLED TEST " + runNumber + "/" + OB_CONTROLLED_TEST_10M.MAX_RUNS,
+    "A/R — Open Balance Report",
+    "Email group: " + label,
+    "Report Date: " + reportDate,
+    "Delivered only to " + OB_CONTROLLED_TEST_10M.RECIPIENT,
+    ""
+  ];
+
+  members.forEach(function(employee) {
+    const rows = byEmployee[employee] || [];
+    lines.push(employee);
+
+    if (!rows.length) {
+      lines.push("No open transactions in this report.", "");
+      return;
+    }
+
+    const summary = obBuildControlledTestEmployeeSummary_(rows);
+    lines.push(
+      "Open Balance: " + obMoney_(summary.openBalance),
+      "Open Payments: " + obMoney_(summary.openPayments),
+      "Transactions: " + rows.length,
+      "Full transaction table is included in the HTML email.",
+      ""
+    );
+  });
+
+  lines.push(
+    "Controlled test: A/R Aging is calculated from Invoice Date.",
+    "Production aging must use Striven Due Date once that field is enriched."
+  );
+
+  return lines.join("\n");
+}
+
