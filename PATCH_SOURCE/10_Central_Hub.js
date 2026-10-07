@@ -13,6 +13,7 @@ function onOpen() {
     .addItem('Rebuild Report Registry','hub_rebuildReportRegistry')
     .addSeparator()
     .addItem('Refresh PO Sales Scope','hub_refreshPoSalesScope')
+    .addItem('Refresh PO Inventory Scope','hub_refreshPoInventoryScope')
     .addSeparator()
     .addItem('Validate Project Registry','hub_validateProjectRegistry')
     .addItem('Add Project Source','hub_addProjectSource')
@@ -2294,7 +2295,8 @@ function hub_refreshPoSalesScope() {
     'yyyyMMdd_HHmmss'
   );
 
-  const poRecordIds = [2744, 2739, 2745];
+  const poRecordIds = [4168, 4173, 4174];
+  const expectedPoNumbers = ['2739', '2744', '2745'];
   let apiCalls = 0;
 
   try {
@@ -2323,6 +2325,7 @@ function hub_refreshPoSalesScope() {
 
     const itemNumberById = hub_poSalesScopeItemNumberMap_();
     const rows = [];
+    const returnedPoNumbers = [];
 
     poRecordIds.forEach(function(poRecordId) {
       const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
@@ -2333,6 +2336,14 @@ function hub_refreshPoSalesScope() {
           'Purchase Order response ID mismatch for requested record ' + poRecordId + '.'
         );
       }
+
+      const returnedPoNumber = String(po.poNumber || '').trim();
+      if (!returnedPoNumber) {
+        throw new Error(
+          'Purchase Order record ' + poRecordId + ' returned a blank PO Number.'
+        );
+      }
+      returnedPoNumbers.push(returnedPoNumber);
 
       const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
       if (!lineItems.length) {
@@ -2372,6 +2383,20 @@ function hub_refreshPoSalesScope() {
       });
     });
 
+    const actualPoNumbers = returnedPoNumbers.slice().sort();
+    const expectedSorted = expectedPoNumbers.slice().sort();
+
+    if (
+      actualPoNumbers.length !== expectedSorted.length ||
+      actualPoNumbers.some(function(v, i) { return v !== expectedSorted[i]; })
+    ) {
+      throw new Error(
+        'PO scope mismatch. Records ' + poRecordIds.join(', ') +
+        ' returned [' + actualPoNumbers.join(', ') +
+        '], expected exactly [' + expectedSorted.join(', ') + '].'
+      );
+    }
+
     if (!rows.length) {
       throw new Error('PO Sales Scope produced zero rows; existing sheet was not replaced.');
     }
@@ -2404,6 +2429,8 @@ function hub_refreshPoSalesScope() {
     sh.setFrozenRows(1);
     sh.autoResizeColumns(1, headers.length);
 
+    hub_rebuildPoItemScope_();
+
     const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
 
     hub_apiUsage_(
@@ -2426,6 +2453,8 @@ function hub_refreshPoSalesScope() {
       'PO Sales Scope refreshed.',
       JSON.stringify({
         poRecordIds: poRecordIds,
+        expectedPoNumbers: expectedPoNumbers,
+        returnedPoNumbers: returnedPoNumbers,
         rows: rows.length,
         apiCalls: apiCalls,
         tokenRequestMade: tokenInfo.requestedNewToken,
@@ -2443,6 +2472,8 @@ function hub_refreshPoSalesScope() {
     return {
       status: 'PASS',
       poRecordIds: poRecordIds,
+      expectedPoNumbers: expectedPoNumbers,
+      returnedPoNumbers: returnedPoNumbers,
       rows: rows.length,
       apiCalls: apiCalls,
       tokenRequestMade: tokenInfo.requestedNewToken,
@@ -2553,4 +2584,665 @@ function hub_poSalesScopeItemNumberFromName_(value) {
   return m ? m[1] : '';
 }
 
+
+function hub_rebuildPoItemScope_() {
+  const ss = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('PO_SALES_SCOPE');
+  if (!src || src.getLastRow() < 2) {
+    throw new Error('PO_SALES_SCOPE is missing or empty.');
+  }
+
+  const values = src.getDataRange().getValues();
+  const headers = values[0].map(function(v) { return String(v).trim(); });
+
+  const poCol = headers.indexOf('PO Number');
+  const itemIdCol = headers.indexOf('Item ID');
+  const itemNumberCol = headers.indexOf('Item Number');
+  const itemNameCol = headers.indexOf('Item Name');
+  const qtyCol = headers.indexOf('Qty Ordered');
+
+  if ([poCol, itemIdCol, itemNumberCol, itemNameCol, qtyCol].some(function(i) { return i < 0; })) {
+    throw new Error('PO_SALES_SCOPE schema is missing required columns.');
+  }
+
+  const byItem = {};
+  values.slice(1).forEach(function(row) {
+    const itemId = String(row[itemIdCol] == null ? '' : row[itemIdCol]).trim();
+    if (!itemId) return;
+
+    const poNumber = String(row[poCol] == null ? '' : row[poCol]).trim();
+    const qty = Number(row[qtyCol] || 0);
+
+    if (!byItem[itemId]) {
+      byItem[itemId] = {
+        itemId: Number(itemId),
+        itemNumber: String(row[itemNumberCol] == null ? '' : row[itemNumberCol]).trim(),
+        itemName: String(row[itemNameCol] == null ? '' : row[itemNameCol]).trim(),
+        q2739: 0,
+        q2744: 0,
+        q2745: 0,
+        poMap: {},
+        sourceLines: 0,
+        exception: ''
+      };
+    }
+
+    const x = byItem[itemId];
+    if (poNumber === '2739') x.q2739 += qty;
+    if (poNumber === '2744') x.q2744 += qty;
+    if (poNumber === '2745') x.q2745 += qty;
+    x.poMap[poNumber] = true;
+    x.sourceLines++;
+
+    if (String(x.itemNumber).toUpperCase() === 'ENTERNEWPART') {
+      x.exception = 'REVIEW — ENTERNEWPART placeholder';
+    }
+  });
+
+  const rows = Object.keys(byItem)
+    .map(function(k) { return byItem[k]; })
+    .sort(function(a, b) {
+      return String(a.itemNumber).localeCompare(String(b.itemNumber), undefined, { numeric: true });
+    })
+    .map(function(x) {
+      return [
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.q2739,
+        x.q2744,
+        x.q2745,
+        x.q2739 + x.q2744 + x.q2745,
+        Object.keys(x.poMap).length,
+        x.sourceLines,
+        x.exception
+      ];
+    });
+
+  const outHeaders = [
+    'Item ID',
+    'Item Number',
+    'Item Name',
+    'PO 2739 Qty',
+    'PO 2744 Qty',
+    'PO 2745 Qty',
+    'Total Qty Ordered',
+    'PO Count',
+    'Source Line Count',
+    'Exception'
+  ];
+
+  let sh = ss.getSheetByName('PO_ITEM_SCOPE');
+  if (!sh) sh = ss.insertSheet('PO_ITEM_SCOPE');
+
+  sh.clearContents();
+  sh.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders]);
+  if (rows.length) sh.getRange(2, 1, rows.length, outHeaders.length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, outHeaders.length);
+
+  return {
+    status: 'PASS',
+    uniqueItems: rows.length,
+    exceptions: rows.filter(function(r) { return String(r[9] || '') !== ''; }).length,
+    strivenApiCalls: 0
+  };
+}
+
 /* === HUB_PO_SALES_SCOPE_R1_END === */
+
+/* === HUB_PO_INVENTORY_SCOPE_R1_BEGIN === */
+function hub_refreshPoInventoryScope() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('PO Inventory Scope refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const asOfDate = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyy-MM-dd'
+  );
+  const runId = 'PO_INVENTORY_SCOPE_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let apiCalls = 0;
+  const snapshotUtc = new Date().toISOString();
+
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) {
+      throw new Error('PO_ITEM_SCOPE is missing or empty. Refresh PO Sales Scope first.');
+    }
+
+    const values = scope.getDataRange().getValues();
+    const headers = values[0].map(function(v) { return String(v).trim(); });
+    const idCol = headers.indexOf('Item ID');
+    const numberCol = headers.indexOf('Item Number');
+    const nameCol = headers.indexOf('Item Name');
+
+    if (idCol < 0 || numberCol < 0 || nameCol < 0) {
+      throw new Error('PO_ITEM_SCOPE schema is missing Item ID / Item Number / Item Name.');
+    }
+
+    const items = values.slice(1)
+      .filter(function(r) { return r[idCol] !== '' && r[idCol] != null; })
+      .map(function(r) {
+        return {
+          itemId: Number(r[idCol]),
+          itemNumber: String(r[numberCol] == null ? '' : r[numberCol]).trim(),
+          itemName: String(r[nameCol] == null ? '' : r[nameCol]).trim()
+        };
+      });
+
+    if (!items.length) throw new Error('PO_ITEM_SCOPE contains zero Item IDs.');
+    const itemIds = {};
+    items.forEach(function(x) {
+      if (!Number.isInteger(x.itemId) || x.itemId <= 0 || itemIds[x.itemId]) throw new Error('Invalid or duplicate scoped Item ID: '+x.itemId);
+      itemIds[x.itemId] = true;
+    });
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(
+      props.getProperty('CLIENT_ID') ||
+      props.getProperty('STRIVEN_CLIENT_ID') ||
+      ''
+    ).trim();
+    const clientSecret = String(
+      props.getProperty('CLIENT_SECRET') ||
+      props.getProperty('STRIVEN_CLIENT_SECRET') ||
+      ''
+    ).trim();
+
+    if (!clientId || !clientSecret) {
+      throw new Error('Missing Striven API credentials.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    if (tokenInfo.requestedNewToken) apiCalls++;
+
+    const detailRows = [];
+    const summaryByItem = {};
+    const exceptions = [];
+
+    items.forEach(function(item) {
+      const result = hub_fetchItemInventoryLocations_(
+        item.itemId,
+        asOfDate,
+        tokenInfo.accessToken
+      );
+      apiCalls++;
+
+      const locations = hub_extractInventoryLocationRows_(result);
+
+      if (!locations.length) {
+        summaryByItem[item.itemId] = {
+          itemId: item.itemId,
+          itemNumber: item.itemNumber,
+          itemName: item.itemName,
+          qtyOnHand: '',
+          qtyOnSO: '',
+          qtyOnPO: '',
+          qtyOnBuild: '',
+          qtyAvailable: '',
+          qtyPendingBuild: '',
+          locationCount: 0,
+          exception: 'NO INVENTORY LOCATION ROWS RETURNED'
+        };
+        exceptions.push(item.itemId);
+        return;
+      }
+
+      const sum = {
+        itemId: item.itemId,
+        itemNumber: item.itemNumber,
+        itemName: item.itemName,
+        qtyOnHand: 0,
+        qtyOnSO: 0,
+        qtyOnPO: 0,
+        qtyOnBuild: 0,
+        qtyAvailable: 0,
+        qtyPendingBuild: 0,
+        locationCount: 0,
+        exception: ''
+      };
+
+      const seenLocations = {};
+      locations.forEach(function(loc) {
+        const locationId = hub_requiredInventoryNumber_(loc, 'inventoryLocationID');
+        if (!Number.isInteger(locationId) || locationId <= 0 || seenLocations[locationId]) {
+          throw new Error('Invalid or duplicate inventory location for Item ID '+item.itemId);
+        }
+        seenLocations[locationId] = true;
+        const locationName = hub_inventoryLocationName_(loc);
+        if (!locationName) throw new Error('Inventory location name missing for Item ID '+item.itemId);
+        const qtyOnHand = hub_requiredInventoryNumber_(loc, 'qtyOnHand');
+        const qtyOnSO = hub_requiredInventoryNumber_(loc, 'qtyOnSalesOrders');
+        const qtyOnPO = hub_requiredInventoryNumber_(loc, 'qtyOnPurchaseOrders');
+        const qtyOnBuild = hub_requiredInventoryNumber_(loc, 'qtyOnIncompleteBuilds');
+        const qtyAvailable = hub_requiredInventoryNumber_(loc, 'qtyAvailable');
+        const qtyPendingBuild = hub_requiredInventoryNumber_(loc, 'qtyOnPendingBuilds');
+
+        detailRows.push([
+          asOfDate,
+          item.itemId,
+          item.itemNumber,
+          item.itemName,
+          locationId,
+          locationName,
+          qtyOnHand,
+          qtyOnSO,
+          qtyOnPO,
+          qtyOnBuild,
+          qtyOnHand - qtyOnSO,
+          qtyAvailable,
+          qtyPendingBuild,
+          snapshotUtc
+        ]);
+
+        sum.qtyOnHand += qtyOnHand;
+        sum.qtyOnSO += qtyOnSO;
+        sum.qtyOnPO += qtyOnPO;
+        sum.qtyOnBuild += qtyOnBuild;
+        sum.qtyAvailable += qtyAvailable;
+        sum.qtyPendingBuild += qtyPendingBuild;
+        sum.locationCount++;
+      });
+
+      summaryByItem[item.itemId] = sum;
+    });
+
+    const detailHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Location ID',
+      'Location',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Incomplete Builds',
+      'Available Calc (On Hand - On SO)',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
+    ];
+
+    const summaryHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Incomplete Builds',
+      'Available Calc (On Hand - On SO)',
+      'Inventory Location Count',
+      'Exception',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
+    ];
+
+    const summaryRows = items.map(function(item) {
+      const x = summaryByItem[item.itemId];
+      if (!x) throw new Error('Missing inventory summary for Item ID '+item.itemId);
+      return [
+        asOfDate,
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.qtyOnHand,
+        x.qtyOnSO,
+        x.qtyOnPO,
+        x.qtyOnBuild,
+        x.locationCount ? x.qtyOnHand - x.qtyOnSO : '',
+        x.locationCount,
+        x.exception,
+        x.qtyAvailable,
+        x.qtyPendingBuild,
+        snapshotUtc
+      ];
+    });
+
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SCOPE', detailHeaders, detailRows);
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SUMMARY', summaryHeaders, summaryRows);
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_apiUsage_(
+      runId,
+      'PO_INVENTORY_SCOPE',
+      '/v1/items/{itemId}/inventory-locations?asofDate=' + asOfDate,
+      'GET',
+      apiCalls,
+      detailRows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshPoInventoryScope'
+    );
+
+    hub_log_(
+      'INFO',
+      'PO_INVENTORY_SCOPE',
+      String(items.length),
+      'Scoped inventory refreshed for PO item universe.',
+      JSON.stringify({
+        asOfDate: asOfDate,
+        scopedItems: items.length,
+        detailRows: detailRows.length,
+        summaryRows: summaryRows.length,
+        exceptions: exceptions.length,
+        apiCalls: apiCalls,
+        tokenRequestMade: tokenInfo.requestedNewToken,
+        strivenWritesPerformed: false
+      })
+    );
+
+    ss.toast(
+      'PO inventory ready: ' + items.length + ' items, ' +
+      detailRows.length + ' location rows.',
+      'Central Hub',
+      8
+    );
+
+    return {
+      status: 'PASS',
+      asOfDate: asOfDate,
+      scopedItems: items.length,
+      detailRows: detailRows.length,
+      summaryRows: summaryRows.length,
+      exceptions: exceptions,
+      apiCalls: apiCalls,
+      strivenWritesPerformed: false
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_fetchItemInventoryLocations_(itemId, asOfDate, token) {
+  const url =
+    'https://api.striven.com/v1/items/' +
+    encodeURIComponent(String(itemId)) +
+    '/inventory-locations?asofDate=' +
+    encodeURIComponent(String(asOfDate));
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Inventory locations fetch failed for Item ID ' + itemId +
+      ' HTTP ' + code + ': ' + hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(
+      'Inventory locations returned non-JSON for Item ID ' + itemId + '.'
+    );
+  }
+}
+
+function hub_extractInventoryLocationRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') throw new Error('Unrecognized inventory response; existing tables retained.');
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.locations, payload.Locations,
+    payload.inventoryLocations, payload.InventoryLocations
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  throw new Error('Inventory response missing a recognized array; existing tables retained.');
+}
+
+function hub_pickInventoryField_(obj, keys, fallback) {
+  if (!obj || typeof obj !== 'object') return fallback;
+  for (let i = 0; i < keys.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(obj, keys[i])) {
+      const v = obj[keys[i]];
+      if (v !== null && v !== undefined && v !== '') return v;
+    }
+  }
+  return fallback;
+}
+
+function hub_inventoryLocationName_(loc) {
+  const direct = hub_pickInventoryField_(loc, [
+    'locationName','LocationName','inventoryLocationName','InventoryLocationName','name','Name'
+  ], '');
+  if (direct) return String(direct);
+
+  const nested = loc && (
+    loc.location || loc.Location ||
+    loc.inventoryLocation || loc.InventoryLocation
+  );
+  if (nested && typeof nested === 'object') {
+    return String(
+      nested.name || nested.Name || nested.locationName || nested.LocationName || ''
+    );
+  }
+  return '';
+}
+
+function hub_numberOrZero_(value) {
+  const n = Number(value);
+  return isFinite(n) ? n : 0;
+}
+
+function hub_writeTableSheet_(ss, sheetName, headers, rows) {
+  let sh = ss.getSheetByName(sheetName);
+  if (!sh) sh = ss.insertSheet(sheetName);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows.length) {
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, headers.length);
+}
+
+/** Exact response fields verified in PO_DATA_CONTRACT_PROBE on 2026-10-07. */
+function hub_requiredInventoryNumber_(obj, key) {
+  if (!obj || !Object.prototype.hasOwnProperty.call(obj,key) ||
+      obj[key] === null || obj[key] === undefined ||
+      typeof obj[key] === 'boolean' || String(obj[key]).trim() === '' ||
+      (typeof obj[key] !== 'number' && typeof obj[key] !== 'string')) {
+    throw new Error('Missing or invalid inventory field: '+key+'; existing inventory tables retained.');
+  }
+  const n = Number(obj[key]);
+  if (!Number.isFinite(n)) throw new Error('Non-numeric inventory field: '+key);
+  return n;
+}
+/* === HUB_PO_INVENTORY_SCOPE_R1_END === */
+
+
+
+
+/* === HUB_PO_TX_PROBE_R1 === */
+function hub_probeTransactionEndpoints() {
+  const props = PropertiesService.getScriptProperties();
+  const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+  const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+  if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+
+  const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+  const endpoints = [
+    '/v1/invoices/search',
+    '/v1/credit-memos/search',
+    '/v1/sales-receipts/search'
+  ];
+  const payloads = [
+    { PageIndex: 0, PageSize: 2, SortExpression: 'TransactionDate', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2, SortExpression: 'Date', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2 }
+  ];
+  const rows = [['Endpoint','Payload','HTTP','Response Preview']];
+
+  endpoints.forEach(function(path) {
+    payloads.forEach(function(payload) {
+      const response = UrlFetchApp.fetch('https://api.striven.com' + path, {
+        method: 'post',
+        headers: {
+          Authorization: 'Bearer ' + tokenInfo.accessToken,
+          Accept: 'application/json'
+        },
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+      rows.push([
+        path,
+        JSON.stringify(payload),
+        response.getResponseCode(),
+        hub_safeExternalText_(response.getContentText(), 2000)
+      ]);
+    });
+  });
+
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName('PO_TX_PROBE');
+  if (!sh) sh = ss.insertSheet('PO_TX_PROBE');
+  sh.clearContents();
+  sh.getRange(1,1,rows.length,rows[0].length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, rows[0].length);
+  return {status:'PASS', rows:rows.length - 1};
+}
+/* === HUB_PO_TX_PROBE_R1_END === */
+
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1 === */
+/**
+ * Google Apps Script: read-only source inspection; manual execution.
+ * Outputs complete response bodies to PO_DATA_CONTRACT_PROBE, never public logs.
+ * No transaction totals or inventory numbers are inferred from this probe.
+ */
+function hub_probePoDataContracts() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('PO data contract probe already running.');
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const prior = ss.getSheetByName('PO_TX_PROBE');
+    if (!prior || prior.getLastRow() < 2) throw new Error('Run hub_probeTransactionEndpoints first.');
+    const sourceRows = prior.getRange(2,1,prior.getLastRow()-1,4).getValues();
+    const requests = [];
+    const seen = {};
+    sourceRows.forEach(function(row) {
+      if (Number(row[2]) !== 200) return;
+      let p;
+      try { p = JSON.parse(String(row[3])); } catch(e) { return; }
+      if (!Array.isArray(p.data)) return;
+      let root = '';
+      if (row[0] === '/v1/invoices/search') root = '/v1/invoices/';
+      if (row[0] === '/v1/credit-memos/search') root = '/v1/credit-memos/';
+      if (!root) return;
+      p.data.slice(0,2).forEach(function(x) {
+        if (!x || !Number.isInteger(Number(x.id)) || Number(x.id) <= 0) return;
+        const path = root + Number(x.id);
+        if (seen[path]) return;
+        seen[path] = true;
+        requests.push({path:path,method:'get',body:null});
+      });
+    });
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:1,PageSize:2}});
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:0,PageSize:3}});
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) throw new Error('PO_ITEM_SCOPE missing.');
+    const scopeRows = scope.getDataRange().getValues();
+    const idCol = scopeRows[0].indexOf('Item ID');
+    if (idCol < 0) throw new Error('PO_ITEM_SCOPE missing Item ID.');
+    const asOfDate = Utilities.formatDate(new Date(), 'America/Toronto', 'yyyy-MM-dd');
+    scopeRows.slice(1).filter(function(row) { return Number(row[idCol]) > 0 && Number(row[idCol]) !== 36935; })
+      .slice(0,2).forEach(function(row) {
+        requests.push({path:'/v1/items/'+Number(row[idCol])+'/inventory-locations?asofDate='+asOfDate,method:'get',body:null});
+      });
+    if (!requests.some(function(x) { return x.path.indexOf('/v1/invoices/') === 0; })) {
+      throw new Error('No parseable successful invoice sample; existing probe output retained.');
+    }
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+    if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+    const token = hub_strivenAccessToken_(clientId,clientSecret);
+    const snapshot = new Date().toISOString();
+    const rows = requests.map(function(x) {
+      const options = {method:x.method,headers:{Authorization:'Bearer '+token.accessToken,Accept:'application/json'},muteHttpExceptions:true};
+      if (x.body) { options.contentType='application/json'; options.payload=JSON.stringify(x.body); }
+      const response = UrlFetchApp.fetch('https://api.striven.com'+x.path,options);
+      const status = response.getResponseCode();
+      if (status === 401) {
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+        throw new Error('Striven authorization expired; existing probe retained.');
+      }
+      const text = response.getContentText();
+      if (text.length > 45000) throw new Error('Response exceeds cell limit; refusing truncated contract evidence.');
+      let keys = '';
+      try { const p=JSON.parse(text); keys=Array.isArray(p)?'ARRAY':Object.keys(p||{}).join(', '); } catch(e) {}
+      return [snapshot,x.method.toUpperCase(),x.path,x.body?JSON.stringify(x.body):'',status,keys,text];
+    });
+    hub_writeTableSheet_(ss,'PO_DATA_CONTRACT_PROBE',
+      ['Snapshot UTC','Method','Endpoint','Request','HTTP','Top-level Fields','Full Response'],rows);
+    const failures=rows.filter(function(r) { return r[4] < 200 || r[4] >= 300; }).length;
+    return {status:failures?'PARTIAL':'PASS',requests:rows.length,httpFailures:failures,strivenWritesPerformed:false};
+  } finally { lock.releaseLock(); }
+}
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1_END === */
+
+/** Google Apps Script: read-only report contract inspection. Keys stay in private config. */
+function hub_probePoReportFeeds() {
+  const ss=SpreadsheetApp.getActive();
+  const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG');
+  if(!cfg) throw new Error('PO report private configuration missing.');
+  const props=PropertiesService.getScriptProperties();
+  const id=props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID');
+  const secret=props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET');
+  if(!id||!secret)throw new Error('Striven credentials missing.');
+  const token=hub_strivenAccessToken_(id,secret).accessToken;
+  const urls=cfg.getRange('B2:B3').getValues().map(r=>String(r[0]).trim());
+  const rows=urls.map(function(url,i){
+    if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+$/.test(url))throw new Error('Invalid configured report feed '+(i+1));
+    const response=UrlFetchApp.fetch(hub_reportPagedUrl_(url,0,2),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});
+    const http=response.getResponseCode();
+    if(http!==200)throw new Error('Report feed '+(i+1)+' HTTP '+http+'; prior output retained.');
+    let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Report feed '+(i+1)+' returned non-JSON.');}
+    const sample=JSON.stringify(p);
+    if(sample.length>45000)throw new Error('Report page exceeds evidence cell size.');
+    return [new Date().toISOString(),i+1,http,Array.isArray(p)?'ARRAY':Object.keys(p).join(', '),sample];
+  });
+  hub_writeTableSheet_(ss,'PO_REPORT_CONTRACT_PROBE',['Snapshot UTC','Feed','HTTP','Fields','Response'],rows);
+  return {status:'PASS',feeds:rows.length,strivenWritesPerformed:false};
+}
