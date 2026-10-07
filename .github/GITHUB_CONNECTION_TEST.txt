@@ -1,1 +1,1 @@
-github connector write test v1
+github connector write test v2
