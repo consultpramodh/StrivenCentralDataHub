@@ -1,0 +1,36 @@
+name: Run PO Inventory Refresh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/run-po-inventory.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure clasp auth
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Run scoped inventory refresh
+        run: |
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p RUN
+          cat > RUN/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID"}
+          EOF
+          clasp run hub_refreshPoInventoryScope --project RUN
