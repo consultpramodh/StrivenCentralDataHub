@@ -2294,7 +2294,11 @@ function hub_refreshPoSalesScope() {
     'yyyyMMdd_HHmmss'
   );
 
-  const poTargets = [\n    { recordId: 4168, poNumber: '2744' },\n    { recordId: 4173, poNumber: '2739' },\n    { recordId: 4174, poNumber: '2745' }\n  ];
+  const poTargets = [
+    { recordId: 4168, poNumber: '2744' },
+    { recordId: 4173, poNumber: '2739' },
+    { recordId: 4174, poNumber: '2745' }
+  ];
   let apiCalls = 0;
 
   try {
