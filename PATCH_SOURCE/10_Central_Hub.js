@@ -3265,6 +3265,8 @@ function hub_refreshPoAnalysis() {
     const salesFields=['TransactionDetailId','Description','Qty','InventoryLocation','Amount','UnitofMeasure','ItemName','TransactionNumber','TransactionTransactionDate','TransactionType','ItemItemId','TransactionTransactionId','TransactionStatus','TransactionHistoricalNonPosting','ItemNumber'];
     const poFields=['PurchaseOrderNumber','ItemSalesOrderNumber','ItemSalesOrderName','ItemCustomerNumber','ItemCustomerName','ItemNumber','ItemName','Qty','UnitCost','Amount','QtyBilled','BilledTotal','PurchaseOrderDetailId','ItemItemId','PurchaseOrderPurchaseOrderId'];
     hub_poSchema_(sales,salesFields);hub_poSchema_(pos,poFields);
+    // Re-read the three validated PO records so normal order edits update the product population.
+    hub_refreshPoSalesScope();
     const oldScope=ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues();
     const scope={};const detail=pos.filter(r=>['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))>=0);
     detail.forEach(r=>{const id=String(r.ItemItemId);if(!/^\d+$/.test(id)||Number(id)<=0)throw new Error('Invalid PO Item ID.');if(!scope[id])scope[id]=[Number(id),String(r.ItemNumber||''),String(r.ItemName||''),0,0,0,0,0,0,''];const x=scope[id],q=hub_poNum_(r.Qty);x[3+['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))]+=q;x[6]+=q;x[8]++;});
