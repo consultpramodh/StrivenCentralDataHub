@@ -18,7 +18,7 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 | On-hand inventory | CACHE RECONCILED | 98 summary rows, 301 location rows; both sum to 892.5. Raw endpoint mapping still requires source comparison |
 | Commitments / on-order / available | BLOCKED | Missing fields default to zero in current code; all SO/PO values zero; do not certify available stock |
 | Inventory exceptions | OPEN | ENTERNEWPART 36935 has no inventory location rows. Blank location IDs also require mapping review |
-| Remote transaction probe | FIX COMMITTED; EXECUTION PENDING | Prior green workflow did not execute: unsupported --deploymentId. Runner now uses supported command and checks JSON execution result |
+| Remote transaction probe | RUNNER FIX VERIFIED; AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
 | 2026 transaction extraction | NOT COMPLETE | DATA_TRANSACTIONS still contains SCHEMA_PENDING_SOURCE_AUDIT |
 | Credit classification / status / dates | NOT COMPLETE | Verify source fields and representative actual returns versus financial-only credits |
 | SKU aliases | NOT COMPLETE | Confirm historical Item IDs and equivalent identities; retain evidence, unresolved aliases remain exceptions |
@@ -29,13 +29,14 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 ## Current findings
 
 - Latest implementation is on main; feature/po-sales-scope is older and lacks the inventory layer. Do not deploy the older branch over live code.
+- Corrected runner commit: 25a331172510c062bb323b4f05267ed9a0731223. Actual execution is blocked by Google permissions; do not describe it as a successful probe.
 - A green GitHub workflow is not evidence of successful Apps Script execution; inspect response and workbook effects.
 - Current inventory fallback conflates absent or invalid values with zero. Preserve unknown values until exact fields are proven.
 - PO numbers and API record IDs differ. The older feature branch still incorrectly used PO numbers as API IDs.
 
 ## Execution order
 
-1. Run corrected transaction probe and verify response plus workbook output.
+1. Resolve Apps Script remote execution authorization, or run hub_probeTransactionEndpoints directly in the Apps Script editor; verify workbook output.
 2. Inspect actual inventory response fields; resolve missing location IDs and zero defaults.
 3. Establish transaction search/detail endpoints, date/status fields and pagination.
 4. Extract/cache 2026 invoice, sales receipt and credit memo lines once; classify returns.
