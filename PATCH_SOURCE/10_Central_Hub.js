@@ -2428,6 +2428,8 @@ function hub_refreshPoSalesScope() {
     sh.setFrozenRows(1);
     sh.autoResizeColumns(1, headers.length);
 
+    hub_rebuildPoItemScope_();
+
     const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
 
     hub_apiUsage_(
@@ -2579,6 +2581,111 @@ function hub_poSalesScopeItemNumberFromName_(value) {
   if (!s) return '';
   const m = s.match(/^([^\s]+)\s+-\s+/);
   return m ? m[1] : '';
+}
+
+
+function hub_rebuildPoItemScope_() {
+  const ss = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('PO_SALES_SCOPE');
+  if (!src || src.getLastRow() < 2) {
+    throw new Error('PO_SALES_SCOPE is missing or empty.');
+  }
+
+  const values = src.getDataRange().getValues();
+  const headers = values[0].map(function(v) { return String(v).trim(); });
+
+  const poCol = headers.indexOf('PO Number');
+  const itemIdCol = headers.indexOf('Item ID');
+  const itemNumberCol = headers.indexOf('Item Number');
+  const itemNameCol = headers.indexOf('Item Name');
+  const qtyCol = headers.indexOf('Qty Ordered');
+
+  if ([poCol, itemIdCol, itemNumberCol, itemNameCol, qtyCol].some(function(i) { return i < 0; })) {
+    throw new Error('PO_SALES_SCOPE schema is missing required columns.');
+  }
+
+  const byItem = {};
+  values.slice(1).forEach(function(row) {
+    const itemId = String(row[itemIdCol] == null ? '' : row[itemIdCol]).trim();
+    if (!itemId) return;
+
+    const poNumber = String(row[poCol] == null ? '' : row[poCol]).trim();
+    const qty = Number(row[qtyCol] || 0);
+
+    if (!byItem[itemId]) {
+      byItem[itemId] = {
+        itemId: Number(itemId),
+        itemNumber: String(row[itemNumberCol] == null ? '' : row[itemNumberCol]).trim(),
+        itemName: String(row[itemNameCol] == null ? '' : row[itemNameCol]).trim(),
+        q2739: 0,
+        q2744: 0,
+        q2745: 0,
+        poMap: {},
+        sourceLines: 0,
+        exception: ''
+      };
+    }
+
+    const x = byItem[itemId];
+    if (poNumber === '2739') x.q2739 += qty;
+    if (poNumber === '2744') x.q2744 += qty;
+    if (poNumber === '2745') x.q2745 += qty;
+    x.poMap[poNumber] = true;
+    x.sourceLines++;
+
+    if (String(x.itemNumber).toUpperCase() === 'ENTERNEWPART') {
+      x.exception = 'REVIEW — ENTERNEWPART placeholder';
+    }
+  });
+
+  const rows = Object.keys(byItem)
+    .map(function(k) { return byItem[k]; })
+    .sort(function(a, b) {
+      return String(a.itemNumber).localeCompare(String(b.itemNumber), undefined, { numeric: true });
+    })
+    .map(function(x) {
+      return [
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.q2739,
+        x.q2744,
+        x.q2745,
+        x.q2739 + x.q2744 + x.q2745,
+        Object.keys(x.poMap).length,
+        x.sourceLines,
+        x.exception
+      ];
+    });
+
+  const outHeaders = [
+    'Item ID',
+    'Item Number',
+    'Item Name',
+    'PO 2739 Qty',
+    'PO 2744 Qty',
+    'PO 2745 Qty',
+    'Total Qty Ordered',
+    'PO Count',
+    'Source Line Count',
+    'Exception'
+  ];
+
+  let sh = ss.getSheetByName('PO_ITEM_SCOPE');
+  if (!sh) sh = ss.insertSheet('PO_ITEM_SCOPE');
+
+  sh.clearContents();
+  sh.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders]);
+  if (rows.length) sh.getRange(2, 1, rows.length, outHeaders.length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, outHeaders.length);
+
+  return {
+    status: 'PASS',
+    uniqueItems: rows.length,
+    exceptions: rows.filter(function(r) { return String(r[9] || '') !== ''; }).length,
+    strivenApiCalls: 0
+  };
 }
 
 /* === HUB_PO_SALES_SCOPE_R1_END === */
