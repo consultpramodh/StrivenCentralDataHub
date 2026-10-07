@@ -1,0 +1,44 @@
+name: Enable Hub API Execution
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/enable-hub-api-execution.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure clasp auth
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull current project
+        run: |
+          SCRIPT_ID="$(tr -d '\r\n' < SCRIPT_ID.txt)"
+          mkdir -p RUN/src
+          cat > RUN/.clasp.json <<EOF
+          {"scriptId":"$SCRIPT_ID","rootDir":"src"}
+          EOF
+          clasp pull --project RUN
+          grep -q '"executionApi"' RUN/src/appsscript.json
+      - name: Create executable deployment
+        run: |
+          clasp deploy --project RUN --description "Central Hub self-only API execution"
+          clasp deployments --project RUN
+      - name: Verify remote execution
+        run: |
+          clasp run hub_refreshPoInventoryScope --project RUN
