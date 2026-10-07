@@ -2294,7 +2294,7 @@ function hub_refreshPoSalesScope() {
     'yyyyMMdd_HHmmss'
   );
 
-  const poRecordIds = [2744, 2739, 2745];
+  const poTargets = [\n    { recordId: 4168, poNumber: '2744' },\n    { recordId: 4173, poNumber: '2739' },\n    { recordId: 4174, poNumber: '2745' }\n  ];
   let apiCalls = 0;
 
   try {
@@ -2324,13 +2324,21 @@ function hub_refreshPoSalesScope() {
     const itemNumberById = hub_poSalesScopeItemNumberMap_();
     const rows = [];
 
-    poRecordIds.forEach(function(poRecordId) {
+    poTargets.forEach(function(target) {\n      const poRecordId = target.recordId;
       const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
       apiCalls++;
 
       if (!po || Number(po.id) !== Number(poRecordId)) {
         throw new Error(
           'Purchase Order response ID mismatch for requested record ' + poRecordId + '.'
+        );
+      }
+
+      if (String(po.poNumber || '').trim() !== target.poNumber) {
+        throw new Error(
+          'Purchase Order number mismatch for record ' + poRecordId +
+          '. Expected PO ' + target.poNumber +
+          ', got ' + String(po.poNumber || '') + '.'
         );
       }
 
@@ -2425,7 +2433,7 @@ function hub_refreshPoSalesScope() {
       '2744,2739,2745',
       'PO Sales Scope refreshed.',
       JSON.stringify({
-        poRecordIds: poRecordIds,
+        poTargets: poTargets,
         rows: rows.length,
         apiCalls: apiCalls,
         tokenRequestMade: tokenInfo.requestedNewToken,
@@ -2442,7 +2450,7 @@ function hub_refreshPoSalesScope() {
 
     return {
       status: 'PASS',
-      poRecordIds: poRecordIds,
+      poTargets: poTargets,
       rows: rows.length,
       apiCalls: apiCalls,
       tokenRequestMade: tokenInfo.requestedNewToken,
