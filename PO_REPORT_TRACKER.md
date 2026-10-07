@@ -18,8 +18,8 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 | On-hand inventory | CACHE RECONCILED | 98 summary rows, 301 location rows; both sum to 892.5. Raw endpoint mapping still requires source comparison |
 | Commitments / on-order / available | BLOCKED | Missing fields default to zero in current code; all SO/PO values zero; do not certify available stock |
 | Inventory exceptions | OPEN | ENTERNEWPART 36935 has no inventory location rows. Blank location IDs also require mapping review |
-| Remote transaction probe | RUNNER FIX VERIFIED; AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
-| 2026 transaction extraction | NOT COMPLETE | DATA_TRANSACTIONS still contains SCHEMA_PENDING_SOURCE_AUDIT |
+| Remote transaction probe | MANUAL EXECUTION VERIFIED; REMOTE AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
+| 2026 transaction extraction | CONTRACT INSPECTION | DATA_TRANSACTIONS still contains SCHEMA_PENDING_SOURCE_AUDIT |
 | Credit classification / status / dates | NOT COMPLETE | Verify source fields and representative actual returns versus financial-only credits |
 | SKU aliases | NOT COMPLETE | Confirm historical Item IDs and equivalent identities; retain evidence, unresolved aliases remain exceptions |
 | Summary and audit | NOT COMPLETE | Build from reconciled transaction lines; include inventory freshness and unknown fields |
@@ -46,3 +46,9 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 ## Tracking standard
 
 A stage is complete only when its output and acceptance gate pass. Track source commit, deployment verification, execution result, extracted row count, API calls, freshness, exception count and next action independently. No percentages based on code written.
+
+## Probe results — 2026-10-07
+
+Live PO_TX_PROBE read: all three invoice searches returned HTTP 200; all three credit memo searches returned HTTP 200; all three requests to the guessed /v1/sales-receipts/search returned HTTP 404. Search samples expose headers, not item quantities or a verified accounting date/status. Reported totalCount 13,506 invoices and 2 credit memos are unfiltered probe responses, not 2026 totals or proof of complete history. Sort behavior is not established by identical responses.
+
+Next diagnostic: hub_probePoDataContracts, committed in a5889eb06922a807f4869afcef840d5a852618fa. It samples source-derived invoice IDs, tests credit detail routes and pagination, and captures raw inventory responses for two scoped items. Saves complete response evidence to PO_DATA_CONTRACT_PROBE. Syntax checked with node; actual execution pending. Deployment is tracked separately from execution.
