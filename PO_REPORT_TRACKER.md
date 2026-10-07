@@ -16,7 +16,7 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 | PO extraction | LIVE DATA CHECKED | 213 lines; record IDs 4168/4173/4174 map to PO numbers 2739/2744/2745; total ordered 2,812 |
 | Unique item master | LIVE DATA CHECKED | PO_ITEM_SCOPE has 98 rows; total ordered independently reconciles to PO detail |
 | On-hand inventory | CACHE RECONCILED | 98 summary rows, 301 location rows; both sum to 892.5. Raw endpoint mapping still requires source comparison |
-| Commitments / on-order / available | BLOCKED | Missing fields default to zero in current code; all SO/PO values zero; do not certify available stock |
+| Commitments / on-order / available | FIX TESTED; DEPLOYMENT / REFRESH PENDING | Exact source fields confirmed; use qtyAvailable from Striven. Full 98-item refresh still required |
 | Inventory exceptions | OPEN | ENTERNEWPART 36935 has no inventory location rows. Blank location IDs also require mapping review |
 | Remote transaction probe | MANUAL EXECUTION VERIFIED; REMOTE AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
 | 2026 transaction extraction | CONTRACT INSPECTION | DATA_TRANSACTIONS still contains SCHEMA_PENDING_SOURCE_AUDIT |
@@ -52,3 +52,17 @@ A stage is complete only when its output and acceptance gate pass. Track source 
 Live PO_TX_PROBE read: all three invoice searches returned HTTP 200; all three credit memo searches returned HTTP 200; all three requests to the guessed /v1/sales-receipts/search returned HTTP 404. Search samples expose headers, not item quantities or a verified accounting date/status. Reported totalCount 13,506 invoices and 2 credit memos are unfiltered probe responses, not 2026 totals or proof of complete history. Sort behavior is not established by identical responses.
 
 Next diagnostic: hub_probePoDataContracts, committed in a5889eb06922a807f4869afcef840d5a852618fa. It samples source-derived invoice IDs, tests credit detail routes and pagination, and captures raw inventory responses for two scoped items. Saves complete response evidence to PO_DATA_CONTRACT_PROBE. Syntax and mocked execution checks passed (8 bounded reads; HTTP failures remain visible). Deployment run 37650974824 succeeded with live PRE backup, freshness check and exact POST source comparison. Actual source execution pending.
+
+## Contract evidence and inventory fix — 2026-10-07
+
+- PO_DATA_CONTRACT_PROBE has 8 successful responses. Invoice and credit detail records expose txnDate, status, isHistoricalNonposting, and lineItems with item.id, qty, price, location and itemGroupLineItems.
+- Credit search pagination: PageIndex 1 / PageSize 2 returns additional records despite totalCount=2. PageSize 3 returns totalCount=3. Never terminate on totalCount; require page exhaustion and duplicate checks.
+- Actual inventory fields: inventoryLocationID, inventoryLocationName, qtyOnHand, qtyAvailable, qtyOnPurchaseOrders, qtyOnSalesOrders, qtyOnIncompleteBuilds, qtyOnPendingBuilds.
+- Sample SKU 56041 / Item 25151: 12 on hand, 5 on SO, 40 on PO, 7 available. Sample 56093 / Item 40276: 6 on hand, 20 on PO, 6 available. These are sampled snapshots, not full refreshed totals.
+- Inventory fix commit 650fd9e2f1569c40f2dc97c4cef7997db0d2352f. Existing functions and leading column positions retained. Build header clarified as incomplete builds; authoritative available, pending builds and UTC snapshot appended. No inventory rows produce unknown (blank) quantities, not zero. Invalid source fields fail before writes. Negative quantities preserved. Syntax and mocked execution tests passed.
+- Official specification inspected at https://api.striven.com/swagger/v1/swagger.json (linked by /help). It documents invoice and credit search/detail paths but no Sales Receipt route. Search date filters are creation/update dates, not txnDate; these must not be substituted for the requested accounting periods.
+- Existing Employee Commission Report / Transactions Raw inspected: TransactionNumber, TransactionType, CustomerNumber, CustomerName, TotalAmount, CreatedDate, TransactionDate, CreatedBy, InvoiceSalesRepFullName, PaymentMethod. No Item IDs or quantities; cannot support product sales totals.
+
+## Required sales dataset contract
+
+Use one API-accessible transaction-line report containing Invoice, Sales Receipt and Credit Memo: Transaction Type, Transaction ID, Transaction Number, accounting Transaction Date, Status, Historical Nonposting flag, Line ID, Item ID, Item Number, Description, Quantity, Unit of Measure, Unit Price / Line Amount, Inventory Location ID, Parent/Group Line ID, return/inventory-impact evidence where exposed, Last Modified Date. Include void/status evidence so exclusions are auditable. Do not modify the existing commission report. Verify dataset coverage and quantities against source transactions, including bundles and actual versus financial-only credits. If native report fields cannot classify returns, record unresolved credit lines as exceptions instead of silently subtracting quantities.
