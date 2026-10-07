@@ -3290,7 +3290,7 @@ function hub_refreshPoAnalysis() {
     hub_poTable_(ss,'PO_SKU_REVIEW',result.aliases);
     SpreadsheetApp.flush();
     if(ss.getSheetByName('PO_API_SALES_LINES').getLastRow()-1!==sales.length||ss.getSheetByName('PO_SALES_SUMMARY').getLastRow()-1!==current.length)throw new Error('Published row count mismatch.');
-    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,aliasReviewRows:result.aliases.length-1,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
+    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,aliasReviewRows:result.aliases.slice(1).filter(r=>String(r[5]).indexOf('REVIEW:')===0).length,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
     hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','PASS_WITH_EXCEPTIONS',snap],['Sales through',through,'Actual transactions only; no Jul-Dec forecast'],['API sales import','PASS',sales.length+' unique rows; pagination exhausted and counts reconciled'],['API PO import','PASS',pos.length+' unique rows'],['Selected PO scope','PASS',detail.length+' lines; '+current.length+' Item IDs; '+out.ordered+' ordered'],['Inventory','PASS',invRows[1][13]],['Returns','REVIEW',out.returnReviewLines+' lines; physical returns unknown unless explicitly classified'],['SKU aliases','REVIEW',out.aliasReviewRows+' candidate relationships; not silently included'],['Attribution','PRODUCT POPULATION','Sales for listed products; no physical PO-lot attribution'],['Schedule','MANUAL','Central Hub > Refresh Complete PO Analysis'],['Safety','PASS','No Striven writes; prior sales retained on source validation failures']]);
     Logger.log(JSON.stringify(out));return out;
   }catch(e){hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','FAILED',snap],['Reason','ACTION REQUIRED',String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]')],['Results','STALE','Last successful outputs retained where available; do not treat as a successful refresh']]);throw new Error(String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]'));}finally{guard.releaseLock();}
@@ -3354,4 +3354,41 @@ function hub_poAliasInventory_(iv,token,through){
  if(!locs.length){canonical[4]='';canonical[5]='';canonical[6]='';canonical[11]='';canonical[10]=String(canonical[10]||'')+'; APPROVED ALIAS INVENTORY UNKNOWN';return;}
  locs.forEach(loc=>{const onHand=hub_requiredInventoryNumber_(loc,'qtyOnHand'),available=hub_requiredInventoryNumber_(loc,'qtyAvailable'),so=hub_requiredInventoryNumber_(loc,'qtyOnSalesOrders'),po=hub_requiredInventoryNumber_(loc,'qtyOnPurchaseOrders');if(canonical[4]!=='')canonical[4]+=onHand;if(canonical[5]!=='')canonical[5]+=so;if(canonical[6]!=='')canonical[6]+=po;if(canonical[11]!=='')canonical[11]+=available;rows.push([Number(d.canonical),Number(id),hub_requiredInventoryNumber_(loc,'inventoryLocationID'),loc.inventoryLocationName||'',onHand,available,so,po,d.evidence]);});
  });return rows;
+}
+
+/** Google Apps Script — bounded read-only evidence for existing return-review lines. */
+function hub_collectPoReturnEvidence() {
+  const lock=LockService.getDocumentLock();
+  if(!lock.tryLock(10000))throw new Error('PO report operation already running.');
+  try {
+    const ss=SpreadsheetApp.getActive(),sh=ss.getSheetByName('PO_RETURN_REVIEW');
+    if(!sh||sh.getLastRow()<2)throw new Error('No return-review lines to inspect.');
+    const source=sh.getDataRange().getValues().slice(1),ids={};
+    source.forEach(r=>{if(!Number.isInteger(Number(r[1]))||Number(r[1])<=0)throw new Error('Invalid transaction identity.');if(['Invoice','Credit Memo','Sales Receipt'].indexOf(r[4])<0)throw new Error('Unexpected review type.');if(r[4]!=='Sales Receipt')ids[r[4]+'|'+r[1]]={type:r[4],id:Number(r[1])};});
+    const requests=Object.values(ids);
+    if(requests.length>40)throw new Error('Review exceeds bounded evidence read limit.');
+    const props=PropertiesService.getScriptProperties(),token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID'),props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
+    hub_poDeadlineMs_=Date.now()+180000;hub_poRetryCount_=0;
+    const evidence={},snapshot=new Date().toISOString();
+    requests.forEach(x=>{
+      const root=x.type==='Invoice'?'/v1/invoices/':'/v1/credit-memos/';
+      const response=hub_poReadFetch_('https://api.striven.com'+root+x.id,{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});
+      if(response.getResponseCode()!==200)throw new Error('Return evidence HTTP '+response.getResponseCode()+' for transaction '+x.id);
+      let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Return evidence is not JSON.');}
+      if(Number(p.id)!==x.id||!Array.isArray(p.lineItems))throw new Error('Unexpected return detail contract.');
+      evidence[x.type+'|'+x.id]=p;
+    });
+    const rows=[['Line ID','Transaction ID','Transaction number','Type','Item ID','Report qty','Matching detail quantities','Memo','Detail status','Historical nonposting','Evidence conclusion','Snapshot UTC']];
+    source.forEach(r=>{
+      const p=evidence[r[4]+'|'+r[1]];
+      if(!p){rows.push([r[0],r[1],r[2],r[4],r[7],r[11],'','','','','Sales Receipt detail unavailable in documented API; native source review required',snapshot]);return;}
+      const lines=[];
+      function collect(xs){xs.forEach(x=>{if(x.item&&String(x.item.id)===String(r[7]))lines.push(x.qty);if(Array.isArray(x.itemGroupLineItems))collect(x.itemGroupLineItems);});}
+      collect(p.lineItems);
+      rows.push([r[0],r[1],r[2],r[4],r[7],r[11],lines.join(', '),String(p.memo||''),typeof p.status==='object'?String(p.status.name||p.status.id||''):String(p.status||''),String(p.isHistoricalNonposting),'Accounting adjustment evidenced; physical receipt / financial-only classification not established',snapshot]);
+    });
+    hub_poTable_(ss,'PO_RETURN_EVIDENCE',rows);
+    const out={status:'PASS_WITH_UNCLASSIFIED_RETURNS',detailReads:requests.length,reviewLines:source.length,snapshot:snapshot,strivenWritesPerformed:false};
+    Logger.log(JSON.stringify(out));return out;
+  }finally{lock.releaseLock();}
 }
