@@ -33,4 +33,4 @@ jobs:
           cat > RUN/.clasp.json <<EOF
           {"scriptId":"$SCRIPT_ID"}
           EOF
-          clasp run hub_probeTransactionEndpoints --project RUN
+          clasp run hub_probeTransactionEndpoints --project RUN --deploymentId AKfycbyZiJ_vm6MxSCYIDWJ2KeY8fpykzP0GjwtwMcL1eSPzzSkcH0eOQNmJtTQ1f6qEiVY8
