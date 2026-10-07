@@ -16,7 +16,7 @@ POs define the product population, not physical purchase-to-sale lineage. Item I
 | PO extraction | LIVE DATA CHECKED | 213 lines; record IDs 4168/4173/4174 map to PO numbers 2739/2744/2745; total ordered 2,812 |
 | Unique item master | LIVE DATA CHECKED | PO_ITEM_SCOPE has 98 rows; total ordered independently reconciles to PO detail |
 | On-hand inventory | CACHE RECONCILED | 98 summary rows, 301 location rows; both sum to 892.5. Raw endpoint mapping still requires source comparison |
-| Commitments / on-order / available | FIX TESTED; DEPLOYMENT / REFRESH PENDING | Exact source fields confirmed; use qtyAvailable from Striven. Full 98-item refresh still required |
+| Commitments / on-order / available | DEPLOYED AND TESTED; REFRESH PENDING | Exact source fields confirmed; use qtyAvailable from Striven. Full 98-item refresh still required |
 | Inventory exceptions | OPEN | ENTERNEWPART 36935 has no inventory location rows. Blank location IDs also require mapping review |
 | Remote transaction probe | MANUAL EXECUTION VERIFIED; REMOTE AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
 | 2026 transaction extraction | CONTRACT INSPECTION | DATA_TRANSACTIONS still contains SCHEMA_PENDING_SOURCE_AUDIT |
@@ -66,3 +66,5 @@ Next diagnostic: hub_probePoDataContracts, committed in a5889eb06922a807f4869afc
 ## Required sales dataset contract
 
 Use one API-accessible transaction-line report containing Invoice, Sales Receipt and Credit Memo: Transaction Type, Transaction ID, Transaction Number, accounting Transaction Date, Status, Historical Nonposting flag, Line ID, Item ID, Item Number, Description, Quantity, Unit of Measure, Unit Price / Line Amount, Inventory Location ID, Parent/Group Line ID, return/inventory-impact evidence where exposed, Last Modified Date. Include void/status evidence so exclusions are auditable. Do not modify the existing commission report. Verify dataset coverage and quantities against source transactions, including bundles and actual versus financial-only credits. If native report fields cannot classify returns, record unresolved credit lines as exceptions instead of silently subtracting quantities.
+
+Inventory R2 deployment verified: run 37651729746 passed live PRE backup, freshness comparison and exact POST source comparison. Next executable action: hub_refreshPoInventoryScope. Sales extraction remains blocked on complete transaction-line source, not on inventory code.
