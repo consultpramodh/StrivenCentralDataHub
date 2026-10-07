@@ -1,86 +1,65 @@
-# PO sales and inventory report — execution tracker
+# PO sales and current inventory — execution tracker
 
-Updated: 2026-10-07. Owner: Classic Fireplace. Implementation: Striven Central Data Hub.
+Updated 2026-10-07. Classic Fireplace / Striven Central Data Hub.
 
-## Definition of done
+## End result
+A working workbook for products on PO 2739, 2744 and 2745: quantities ordered by PO, H1 gross sales (Jan–Jun), H2 gross sales (Jul–latest complete day), accounting signed quantities, verified net where return evidence permits, current inventory and available/committed quantities, transaction audit and explicit exceptions.
 
-For products referenced by PO 2739, 2744 and 2745: show quantities ordered by PO, gross sold, returned and net sold for Jan 1–Jun 30 and Jul 1–latest complete 2026 transaction date; YTD net sold; timestamped actual inventory by location; verified alternate SKU identities; transaction-level audit and exceptions. Future H2 months are not zero sales.
+POs define the product population, not purchase-lot attribution. Inventory comes from Striven, never ordered minus sold. No forecast; cutoff is capped at December 31, 2026. Item ID is the primary identity; proven aliases may combine IDs. Unknown inventory and unresolved physical-return quantities remain blank.
 
-POs define the product population, not physical purchase-to-sale lineage. Item ID is the primary key. Verified equivalent product aliases may combine separate Item IDs; successor products are not automatically equivalent. Only actual merchandise returns reduce unit sales. Financial-only credits affect revenue separately. Ordered minus sold is a comparison, never a stock calculation. Billed quantity is not assumed to be received quantity.
+## Technical delivery
+- Deployed source: `0623a0d26984a84e81c7aa1a9b33bd6eb2d7855e` on `feature/po-sales-scope`.
+- Deployment run 37686528819 passed live PRE backup, freshness comparison, same-project push and exact POST source verification. All existing seven live files preserved.
+- Complete report API import validates field contracts, stable totalRecords, pagination exhaustion and unique line IDs. Reads are paced; rate-limit retries are bounded.
+- Refresh automatically reloads the three PO records and reconciles them against the Wolf PO report before analysis.
+- Manual operation: workbook **Central Hub → Refresh Complete PO Analysis**.
+- Live execution is verified separately from GitHub deployment. No scheduled trigger enabled; scheduling is deferred until business acceptance.
+- Report access keys remain in private workbook configuration. No Striven operational transactions or item records were changed.
 
-## Stages
+## Business acceptance still open
+| Review | Concrete action |
+|---|---|
+| 17 candidate SKU relationships | Confirm same reportable product versus distinct model using PO_SKU_REVIEW. Unproven relationships remain separate. One TravelQ alias is already approved by identical SKU/name/UPC. |
+| 15 credit/negative-quantity lines | Classify physical merchandise return versus financial-only adjustment in PO_RETURN_REVIEW. Twelve source transaction detail records reconciled to the report; two negative Sales Receipt detail records could not be obtained from a documented generic endpoint. Source memos do not establish physical return. Accounting signed quantity is available separately. |
+| Five generic placeholder PO lines / seven ordered units | Source descriptions identify LF680WCKSS ×4, NFR565UGDSS ×2 and NFR565D2NK ×1. Supply actual Striven Item IDs or correct the PO item identities. Generic ENTERNEWPART cannot safely identify sales or stock. |
+| One active placeholder sales line | Invoice 598727 line 60239 describes Powder Coat, qty1. Excluded from product sales and retained in identity review. |
 
-| Stage | Status | Evidence / completion gate |
-|---|---|---|
-| Scope and reporting rules | DEFINED | User supplied conversation and clarified business question |
-| PO extraction | LIVE DATA CHECKED | 213 lines; record IDs 4168/4173/4174 map to PO numbers 2739/2744/2745; total ordered 2,812 |
-| Unique item master | LIVE DATA CHECKED | PO_ITEM_SCOPE has 98 rows; total ordered independently reconciles to PO detail |
-| On-hand inventory | CACHE RECONCILED | 98 summary rows, 301 location rows; both sum to 892.5. Raw endpoint mapping still requires source comparison |
-| Commitments / on-order / available | DEPLOYED AND TESTED; REFRESH PENDING | Exact source fields confirmed; use qtyAvailable from Striven. Full 98-item refresh still required |
-| Inventory exceptions | OPEN | ENTERNEWPART 36935 has no inventory location rows. Blank location IDs also require mapping review |
-| Remote transaction probe | MANUAL EXECUTION VERIFIED; REMOTE AUTH BLOCKED | Prior green workflow did not execute: unsupported --deploymentId. Corrected run 37650396981 reached execution API and was denied permission; it correctly failed instead of showing green. No probe data was produced |
-| 2026 transaction extraction | SOURCE EXPORT RECONCILED; HUB IMPORT PENDING | Transaction Details report 71188: 13,294 unique line IDs; 11,285 Invoice / 1,882 Sales Receipt / 127 Credit Memo; 228 voided lines |
-| Credit classification / status / dates | NOT COMPLETE | Verify source fields and representative actual returns versus financial-only credits |
-| SKU aliases | NOT COMPLETE | Confirm historical Item IDs and equivalent identities; retain evidence, unresolved aliases remain exceptions |
-| Summary and audit | NOT COMPLETE | Build from reconciled transaction lines; include inventory freshness and unknown fields |
-| Acceptance checks | NOT COMPLETE | Complete pagination, duplicate control, detail-to-summary reconciliation and representative source comparisons |
-| Scheduled refresh | DEFERRED | Enable only after acceptance; manual functions remain callable |
+These are business/source decisions, not unresolved API implementation. Physical-product net sales are not fully accepted until these decisions are resolved and applied.
 
-## Current findings
+## Workbook guide
+- PO_REPORT_HOME: landing page, current metrics, refresh status and review links.
+- PO_SALES_SUMMARY: per-item ordered/sales/inventory comparison.
+- PO_TRANSACTION_AUDIT: included/excluded transaction-line decisions.
+- PO_RETURN_REVIEW / PO_RETURN_EVIDENCE: return exceptions and source comparison.
+- PO_SKU_REVIEW / PO_ALIAS_INVENTORY: identity evidence and alternate-ID stock.
+- PO_PLACEHOLDER_SOURCE / PO_ITEM_IDENTITY_REVIEW: raw placeholder descriptions and excluded unidentified sales.
+- PO_REPORT_STATUS: validation/freshness/business status.
+- Hidden PO_API_SALES_LINES / PO_API_ORDER_LINES: complete source caches.
 
-- Latest implementation is on main; feature/po-sales-scope is older and lacks the inventory layer. Do not deploy the older branch over live code.
-- Corrected runner commit: 25a331172510c062bb323b4f05267ed9a0731223. Actual execution is blocked by Google permissions; do not describe it as a successful probe.
-- A green GitHub workflow is not evidence of successful Apps Script execution; inspect response and workbook effects.
-- Current inventory fallback conflates absent or invalid values with zero. Preserve unknown values until exact fields are proven.
-- PO numbers and API record IDs differ. The older feature branch still incorrectly used PO numbers as API IDs.
+Earlier 213-line / 98-item / 2,812-unit scope and pending-import notes are historical and superseded by refreshed source data. A cached recomputation correctly refused a changed scope when PO 2744 gained six units of 69811; live refresh is required after source changes.
 
-## Execution order
+## Final live verification — 2026-10-07
+`test_PoAnalysisRefreshAndVerify` completed PASS at 5:14:49 PM Toronto on the deployed source above. Workbook business status is PASS_WITH_EXCEPTIONS. One bounded rate-limit retry recovered successfully.
 
-1. Resolve Apps Script remote execution authorization, or run hub_probeTransactionEndpoints directly in the Apps Script editor; verify workbook output.
-2. Inspect actual inventory response fields; resolve missing location IDs and zero defaults.
-3. Establish transaction search/detail endpoints, date/status fields and pagination.
-4. Extract/cache 2026 invoice, sales receipt and credit memo lines once; classify returns.
-5. Resolve SKU exceptions; generate summary and audit.
-6. Reconcile and validate before enabling recurring refresh.
+| Metric | Verified current result |
+|---|---:|
+| Full sales source / unique transaction lines | 13,357 |
+| Full Wolf PO source / unique lines | 1,548 |
+| Selected PO lines | 220 |
+| Selected Item IDs | 103 |
+| Ordered quantity | 2,356 |
+| PO2739 lines / qty | 83 / 1,191 |
+| PO2744 lines / qty | 50 / 217 |
+| PO2745 lines / qty | 87 / 948 |
+| H1 gross product quantity | 929 |
+| H2 gross product quantity through Oct6 | 688 |
+| H1 accounting signed quantity | 924.5 |
+| H2 accounting signed quantity through Oct6 | 678 |
+| Known current on hand | 927.5 |
+| Unknown inventory Item IDs | 1 |
 
-## Tracking standard
+Inventory snapshot UTC: 2026-10-07T21:12:08.467Z. The one active Powder Coat placeholder line is excluded from product totals; the seven unidentified ordered units remain visible. The newly scoped 69811 contributes one H1 sale and zero known on-hand quantity; its item description says replaced by 69911, but those two Item IDs are not consolidated automatically.
 
-A stage is complete only when its output and acceptance gate pass. Track source commit, deployment verification, execution result, extracted row count, API calls, freshness, exception count and next action independently. No percentages based on code written.
+Independent recomputation from the full final cached transaction and PO feeds exactly matches gross, accounting signed, return-review count, PO splits and stock totals. Synthetic checks cover period boundaries, cutoff, void/nonposting exclusions, credit handling, impossible dates, placeholder exclusion, numeric SKU/cache date normalization and stale-scope rejection before writes.
 
-## Probe results — 2026-10-07
-
-Live PO_TX_PROBE read: all three invoice searches returned HTTP 200; all three credit memo searches returned HTTP 200; all three requests to the guessed /v1/sales-receipts/search returned HTTP 404. Search samples expose headers, not item quantities or a verified accounting date/status. Reported totalCount 13,506 invoices and 2 credit memos are unfiltered probe responses, not 2026 totals or proof of complete history. Sort behavior is not established by identical responses.
-
-Next diagnostic: hub_probePoDataContracts, committed in a5889eb06922a807f4869afcef840d5a852618fa. It samples source-derived invoice IDs, tests credit detail routes and pagination, and captures raw inventory responses for two scoped items. Saves complete response evidence to PO_DATA_CONTRACT_PROBE. Syntax and mocked execution checks passed (8 bounded reads; HTTP failures remain visible). Deployment run 37650974824 succeeded with live PRE backup, freshness check and exact POST source comparison. Actual source execution pending.
-
-## Contract evidence and inventory fix — 2026-10-07
-
-- PO_DATA_CONTRACT_PROBE has 8 successful responses. Invoice and credit detail records expose txnDate, status, isHistoricalNonposting, and lineItems with item.id, qty, price, location and itemGroupLineItems.
-- Credit search pagination: PageIndex 1 / PageSize 2 returns additional records despite totalCount=2. PageSize 3 returns totalCount=3. Never terminate on totalCount; require page exhaustion and duplicate checks.
-- Actual inventory fields: inventoryLocationID, inventoryLocationName, qtyOnHand, qtyAvailable, qtyOnPurchaseOrders, qtyOnSalesOrders, qtyOnIncompleteBuilds, qtyOnPendingBuilds.
-- Sample SKU 56041 / Item 25151: 12 on hand, 5 on SO, 40 on PO, 7 available. Sample 56093 / Item 40276: 6 on hand, 20 on PO, 6 available. These are sampled snapshots, not full refreshed totals.
-- Inventory fix commit 650fd9e2f1569c40f2dc97c4cef7997db0d2352f. Existing functions and leading column positions retained. Build header clarified as incomplete builds; authoritative available, pending builds and UTC snapshot appended. No inventory rows produce unknown (blank) quantities, not zero. Invalid source fields fail before writes. Negative quantities preserved. Syntax and mocked execution tests passed.
-- Official specification inspected at https://api.striven.com/swagger/v1/swagger.json (linked by /help). It documents invoice and credit search/detail paths but no Sales Receipt route. Search date filters are creation/update dates, not txnDate; these must not be substituted for the requested accounting periods.
-- Existing Employee Commission Report / Transactions Raw inspected: TransactionNumber, TransactionType, CustomerNumber, CustomerName, TotalAmount, CreatedDate, TransactionDate, CreatedBy, InvoiceSalesRepFullName, PaymentMethod. No Item IDs or quantities; cannot support product sales totals.
-
-## Required sales dataset contract
-
-Use one API-accessible transaction-line report containing Invoice, Sales Receipt and Credit Memo: Transaction Type, Transaction ID, Transaction Number, accounting Transaction Date, Status, Historical Nonposting flag, Line ID, Item ID, Item Number, Description, Quantity, Unit of Measure, Unit Price / Line Amount, Inventory Location ID, Parent/Group Line ID, return/inventory-impact evidence where exposed, Last Modified Date. Include void/status evidence so exclusions are auditable. Do not modify the existing commission report. Verify dataset coverage and quantities against source transactions, including bundles and actual versus financial-only credits. If native report fields cannot classify returns, record unresolved credit lines as exceptions instead of silently subtracting quantities.
-
-Inventory R2 deployment verified: run 37651729746 passed live PRE backup, freshness comparison and exact POST source comparison. Next executable action: hub_refreshPoInventoryScope. Sales extraction remains blocked on complete transaction-line source, not on inventory code.
-
-## Transaction Type clarification — 2026-10-07
-
-User confirms Sales Receipt, Invoice and Credit Memo are Transaction Type values. Use the user-corrected Transaction Details dataset, filtered by these types. This clarification does not establish a generic REST transaction endpoint or prove the existing commission feed contains item lines. Registry inspection found Employee Commission Report's composed report fetch; its checked Transactions Raw schema includes TransactionType but lacks Item ID and Quantity. Next source action: inspect the native Transactions report dataset and available line relationships, reusing an existing suitable report where possible. Do not continue guessing a separate Sales Receipt endpoint.
-
-## Native report configuration and full export validation — 2026-10-07
-
-- User corrected the dataset to Transaction Details. Created PO Sales Transaction Audit, report 71188. User subsequently enabled API access; browser list confirms API Access Enabled.
-- Sales report has 15 columns (plan limit): TransactionDetailId, Description, Qty, Inventory Location, Amount, Unit of Measure, Item Name, Transaction Number, Transaction Date, Transaction Type, Item ID, Transaction ID, Transaction Status, Historical Non-Posting, Item Number. Optional Price was replaced with Item Number; source amounts retained.
-- Sales filters: accounting date January 1 through October 6, 2026 inclusive; Credit Memos, Invoices, Sales Receipts. Fixed cutoff must become a refresh-aware complete-day cutoff before scheduled use.
-- Downloaded full CSV through signed-in Striven. Independently counted 13,294 records, all distinct TransactionDetailIds: Invoice 11,285; Sales Receipt 1,882; Credit Memo 127. Status Active 13,066 / Voided 228. Voided and historical nonposting lines must be excluded from accepted sales totals. Positive credit qty is not proof of physical return.
-- User authorized report modifications. PO - Counts report 71184 uses Purchase Order Details. Added PurchaseOrderDetailId, Item ID and PurchaseOrderId, retaining original 12 columns and totals.
-- Corrected Wolf selection from Item Preferred Vendor to actual Purchase Order Vendor = Wolf Steel Ltd. (51986). Retained user-configured 2026 creation-date range. Report count changed from 1,477 to 1,535.
-- Full PO CSV independently reconciled: 1,535 distinct line IDs and 6,012 ordered units across the broader Wolf report. Original scope unchanged: PO2739 = 96 lines / 1,656 qty; PO2744 = 30 / 50; PO2745 = 87 / 1,106. Combined 213 lines / 2,812 qty / 98 unique Item IDs, matching original scope.
-- Both user-supplied report API URLs were attempted from the execution environment; HTTP403, Cloudflare1010 prevented response inspection. Native authenticated report exports are checked; API JSON schema and refresh delivery remain unverified. Never put report access keys into this public tracker or code.
-- Remaining gates: securely configure feed URLs in the existing Hub, execute from Apps Script, verify JSON schema/counts, classify credit returns, resolve aliases, refresh corrected inventory, build summary/audit and validate. No scheduled triggers enabled.
+Technical implementation and manual operation are complete. Full business acceptance remains open only for the explicit review decisions above. Recurring scheduling remains deferred.
