@@ -19,6 +19,8 @@ const OBW = Object.freeze({
   CC: 'jay@classicfireplace.ca',
   ADMIN: 'pramodh@classicfireplace.ca',
   TRIGGER: 'obwRunTuesday10',
+  // Gmail clips around 102 KiB; one full group email must stay under 90 KiB.
+  MAX_HTML_BYTES: 90 * 1024,
   GROUPS: [
     {label:'BEACHES', members:['Steve Trevor','Colleen Trevor']},
     {label:'WHITBY', members:['Matthew McLean','Karen Genis']},
@@ -42,6 +44,41 @@ function obwPreflight() {
       return {label:m.label, rows:m.rows, to:m.to, cc:m.cc, htmlBytes:m.htmlBytes};
     }),
     schedule: 'Every Tuesday around 10:00 AM America/Toronto'
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Controlled email rendering test:
+ * - One fresh Striven report request, no dataset write
+ * - Finds the single largest complete employee group (currently Babz/Bruce)
+ * - Sends ONE unsplit email to Pramodh only
+ * - Never CCs Jay or sends to any Sales Rep
+ * - Does not change Tuesday trigger, send state, or weekly digest
+ *
+ * Run obwSendLargestGroupTest() manually from Apps Script.
+ */
+function obwSendLargestGroupTest() {
+  const plan=obwBuildPlan_();
+  if(plan.issues.length) throw new Error('Test blocked: '+plan.issues.join(' | '));
+  const m=plan.messages.slice().sort(function(a,b){return b.rows-a.rows;})[0];
+  if(!m) throw new Error('Test blocked: no email groups.');
+  if(m.htmlBytes>OBW.MAX_HTML_BYTES) throw new Error('Test HTML too large: '+m.htmlBytes);
+  const subject='[TEST ONLY] '+m.subject;
+  MailApp.sendEmail({
+    to:OBW.ADMIN,
+    subject:subject,
+    body:'TEST ONLY — Do not forward; this is the latest live Striven snapshot.\n\n'+m.plain,
+    htmlBody:m.html,
+    name:'Classic Fireplace & BBQ Store'
+  });
+  const result={
+    status:'TEST_SENT',to:OBW.ADMIN,cc:'',group:m.label,
+    transactions:m.rows,htmlBytes:m.htmlBytes,htmlLimit:OBW.MAX_HTML_BYTES,
+    reportRefreshedAt:plan.refreshedAt.toISOString(),
+    weeklySendUnchanged:true,
+    subject:subject
   };
   console.log(JSON.stringify(result));
   return result;
@@ -135,7 +172,7 @@ function obwRunTuesday10() {
       if (state) throw new Error('Uncertain prior send state for ' + m.label + '; manual review required.');
       // Set state BEFORE sending to avoid duplicate messages on ambiguous failure.
       props.setProperty(stateKey,'SENDING');
-      if(m.htmlBytes>64*1024) throw new Error('Unexpected oversized HTML for '+m.label+'.');
+      if(m.htmlBytes>OBW.MAX_HTML_BYTES) throw new Error('Oversized HTML for '+m.label+'.');
       const opts = {to:m.to.join(','),subject:m.subject,htmlBody:m.html,
         body:m.plain,name:'Classic Fireplace & BBQ Store'};
       if (m.cc) opts.cc = m.cc;
@@ -245,31 +282,20 @@ function obwBuildPlan_() {
       return {name:n,rows:byOwner[n]||[]};
     });
     const date=Utilities.formatDate(feed.fetchedAt,OBW.TIMEZONE,'MMM d, yyyy');
-    try {
-      const parts=obwSplitEmailParts_(s.label,byMember,feed.fetchedAt,names);
-      parts.forEach(function(sections,i) {
-        const partLabel=parts.length>1?
-          s.label+' (Part '+(i+1)+' of '+parts.length+')':s.label;
-        const partRows=[];
-        sections.forEach(function(member) {
-          member.rows.forEach(function(r){partRows.push(r);});
-        });
-        const html=obwEmailHtml_(partLabel,sections,feed.fetchedAt,names);
-        const htmlBytes=Utilities.newBlob(html,'text/html').getBytes().length;
-        if(htmlBytes>64*1024) {
-          throw new Error('HTML payload still too large ('+htmlBytes+' bytes) for '+partLabel);
-        }
-        messages.push({
-          label:partLabel,to:to.slice(),cc:cc,rows:partRows.length,
-          digestRows:partRows.map(function(r){return JSON.stringify(r);}),
-          subject:'Weekly A/R Open Balance - '+partLabel+' - '+date,
-          html:html,htmlBytes:htmlBytes,
-          plain:obwEmailText_(partLabel,sections,feed.fetchedAt,names)
-        });
-      });
-    } catch(err) {
-      issues.push('Size validation failed for '+s.label+': '+String(err.message||err));
+    // One complete email per group — never split the report.
+    const html=obwEmailHtml_(s.label,byMember,feed.fetchedAt,names);
+    const htmlBytes=Utilities.newBlob(html,'text/html').getBytes().length;
+    if(htmlBytes>OBW.MAX_HTML_BYTES) {
+      issues.push('Email for '+s.label+' is '+htmlBytes+
+        ' bytes (> '+OBW.MAX_HTML_BYTES+'). Compact further before sending; splitting is disabled.');
     }
+    messages.push({
+      label:s.label,to:to.slice(),cc:cc,rows:rows.length,
+      digestRows:rows.map(function(r){return JSON.stringify(r);}),
+      subject:'Weekly A/R Open Balance - '+s.label+' - '+date,
+      html:html,htmlBytes:htmlBytes,
+      plain:obwEmailText_(s.label,byMember,feed.fetchedAt,names)
+    });
   });
   const counted=messages.reduce(function(sum,m){return sum+m.rows;},0);
   if(ownerKey && counted!==records.length) issues.push('Coverage mismatch: '+counted+'/'+records.length+' rows.');
@@ -394,42 +420,6 @@ function obwEmailHtml_(label,byMember,refreshedAt,keys) {
     'Confidential — Internal A/R information.</div></div></div>';
 }
 
-/**
- * Partitions very large groups without omitting rows, and guarantees a
- * conservative 56-KiB HTML ceiling per actual outgoing email.
- * No extra Striven API requests.
- */
-function obwSplitEmailParts_(label, sections, refreshedAt, keys) {
-  const limit=56*1024;
-  const getSize=function(parts) {
-    const html=obwEmailHtml_(label,parts,refreshedAt,keys);
-    return Utilities.newBlob(html,'text/html').getBytes().length;
-  };
-  const parts=[];
-  const split=function(input) {
-    if(getSize(input)<=limit) {parts.push(input);return;}
-    const count=input.reduce(function(sum,p){return sum+p.rows.length;},0);
-    if(count<=1) throw new Error(
-      'A single A/R row exceeds the safe email size; no messages sent for '+label+'.'
-    );
-    const half=Math.floor(count/2);
-    let taken=0;
-    const left=[],right=[];
-    input.forEach(function(p) {
-      // Display empty member sections once, never duplicate transactions.
-      if(!p.rows.length) {left.push({name:p.name,rows:[]});return;}
-      const n=Math.max(0,Math.min(p.rows.length,half-taken));
-      if(n>0) left.push({name:p.name,rows:p.rows.slice(0,n)});
-      if(n<p.rows.length) right.push({name:p.name,rows:p.rows.slice(n)});
-      taken+=n;
-    });
-    if(!left.length||!right.length)throw new Error('Unable to split large report '+label);
-    split(left);
-    split(right);
-  };
-  split(sections);
-  return parts;
-}
 function obwEmailText_(label,byMember,refreshedAt,keys) {
   const time=Utilities.formatDate(refreshedAt,OBW.TIMEZONE,'MMM d, yyyy h:mm a')+' ET';
   const lines=['Weekly A/R Open Balance - '+label,'Report Refreshed at: '+time,
