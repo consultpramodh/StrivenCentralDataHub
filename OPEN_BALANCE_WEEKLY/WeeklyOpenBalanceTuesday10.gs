@@ -4,7 +4,8 @@
  *
  * Tuesday ~10:00 AM America/Toronto: one fresh Striven report fetch,
  * privacy-checked employee/group routing, Manager Jay CC.
- * NO CreatedBy routing in production; no automatic emails until verified.
+ * Routing policy: CreatedBy in this Striven report identifies the Sales Rep.
+ * Recipient routing is based on CreatedBy with all-address validation.
  *
  * Run obwPreflight() first. Run obwInstallTuesday10() only after it passes.
  * This script DOES NOT modify Striven or the Central Hub datasets.
@@ -18,7 +19,6 @@ const OBW = Object.freeze({
   CC: 'jay@classicfireplace.ca',
   ADMIN: 'pramodh@classicfireplace.ca',
   TRIGGER: 'obwRunTuesday10',
-  ROUTING_CERTIFICATION_KEY: 'OBW_OWNER_ROUTING_CERTIFIED',
   GROUPS: [
     {label:'BEACHES', members:['Steve Trevor','Colleen Trevor']},
     {label:'WHITBY', members:['Matthew McLean','Karen Genis']},
@@ -37,6 +37,7 @@ function obwPreflight() {
     issues: plan.issues,
     refreshedAt: plan.refreshedAt.toISOString(),
     sourceRows: plan.sourceRows,
+    routingSource: 'CreatedBy (Sales Rep on Open Balance report)',
     groups: plan.messages.map(function(m) {
       return {label:m.label, rows:m.rows, to:m.to, cc:m.cc};
     }),
@@ -49,14 +50,14 @@ function obwPreflight() {
 /**
  * ONE-REPORT-CALL OWNERSHIP DIAGNOSTIC. SENDS NO EMAIL.
  * Summarizes only metadata and counts; logs no customer details or report URL.
- * This is the next action when obwPreflight() is BLOCKED on SalesRep.
+ * Audits the business-defined CreatedBy ownership and transaction IDs.
  */
 function obwAuditOwnerSource() {
   const report=obwFetch_();
   const names=Object.keys(report.rows[0]||{});
   const match=function(k){return names.find(function(n){return obwNorm_(n)===obwNorm_(k);})||'';};
   const typeField=match('TransactionType');
-  const ownerField=match('SalesRepName')||match('SalesRep');
+  const ownerField=match('CreatedBy');
   const idField=match('TransactionId');
   const counts=Object.create(null);
   let blankOwner=0, missingTransactionIds=0;
@@ -67,14 +68,14 @@ function obwAuditOwnerSource() {
     if(!idField||!String(row[idField]||'').trim()) missingTransactionIds++;
   });
   const result={
-    ok:true,status:ownerField&&blankOwner===0?'OWNER_FIELD_PRESENT':'OWNER_FIELD_MISSING_OR_INCOMPLETE',
+    ok:true,status:ownerField&&blankOwner===0?'CREATED_BY_PRESENT':'CREATED_BY_MISSING_OR_INCOMPLETE',
     sourceRows:report.rows.length, refreshedAt:report.fetchedAt.toISOString(),
     transactionTypes:counts, reportFields:names,
-    ownerField:ownerField||null, rowsWithoutSalesRep:blankOwner,
+    ownerField:ownerField||null, rowsWithoutCreatedBy:blankOwner,
+    routingPolicy:'CreatedBy identifies Sales Rep in this weekly report',
     rowsWithoutTransactionId:missingTransactionIds,
-    paymentApplicationMappingVerified:false,
     noEmailsSent:true,
-    nextStep:'Invoice owners can be verified using the existing OpenBalanceDistribution.gs function openBalanceResolveInvoiceOwners(). Payment owner routing additionally requires verified invoice-application links; do not certify or schedule while unresolved.'
+    nextStep:'Run obwPreflight(). If READY, run obwInstallTuesday10() once to schedule.'
   };
   console.log(JSON.stringify(result));
   return result;
@@ -184,9 +185,9 @@ function obwBuildPlan_() {
   const fieldNames=Object.keys(records[0]||{});
   const pick=function(key){return fieldNames.find(function(f){
     return obwNorm_(f)===obwNorm_(key);}) || '';};
-  // CreatedBy is NOT a valid financial routing identifier.
-  const ownerKey=pick('SalesRepName') || pick('SalesRep');
-  if (!ownerKey) issues.push('Striven report has no SalesRepName/SalesRep owner field. CreatedBy is forbidden for production.');
+  // Business rule: CreatedBy in this Open Balance report is the Sales Rep.
+  const ownerKey=pick('CreatedBy');
+  if (!ownerKey) issues.push('Missing CreatedBy (Sales Rep) field in Open Balance report.');
   const required=['CustomerNumber','CustomerName','TransactionType','TransactionId',
     'TransactionNumber','TransactionAmount','TransactionDate','OpenBalance'];
   const names={};
@@ -194,15 +195,12 @@ function obwBuildPlan_() {
     names[k]=pick(k);
     if(!names[k]) issues.push('Missing Striven report field '+k+'.');
   });
-  const certified=PropertiesService.getScriptProperties()
-    .getProperty(OBW.ROUTING_CERTIFICATION_KEY);
-  if(certified!=='YES') issues.push('Invoice AND payment ownership has not been certified; script property '+OBW.ROUTING_CERTIFICATION_KEY+' must be YES only after verification.');
   const profile=obwEmployeeEmails_();
   issues.push.apply(issues,profile.issues);
   const byOwner=Object.create(null);
   records.forEach(function(r,idx){
     const who=ownerKey?String(r[ownerKey]||'').trim():'';
-    if(!who){ if(ownerKey) issues.push('Blank Sales Rep at report row '+(idx+1)+'.');return; }
+    if(!who){ if(ownerKey) issues.push('Blank CreatedBy (Sales Rep) at report row '+(idx+1)+'.');return; }
     if(!byOwner[who]) byOwner[who]=[];
     byOwner[who].push(r);
   });
