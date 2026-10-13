@@ -39,7 +39,7 @@ function obwPreflight() {
     sourceRows: plan.sourceRows,
     routingSource: 'CreatedBy (Sales Rep on Open Balance report)',
     groups: plan.messages.map(function(m) {
-      return {label:m.label, rows:m.rows, to:m.to, cc:m.cc};
+      return {label:m.label, rows:m.rows, to:m.to, cc:m.cc, htmlBytes:m.htmlBytes};
     }),
     schedule: 'Every Tuesday around 10:00 AM America/Toronto'
   };
@@ -135,6 +135,7 @@ function obwRunTuesday10() {
       if (state) throw new Error('Uncertain prior send state for ' + m.label + '; manual review required.');
       // Set state BEFORE sending to avoid duplicate messages on ambiguous failure.
       props.setProperty(stateKey,'SENDING');
+      if(m.htmlBytes>64*1024) throw new Error('Unexpected oversized HTML for '+m.label+'.');
       const opts = {to:m.to.join(','),subject:m.subject,htmlBody:m.html,
         body:m.plain,name:'Classic Fireplace & BBQ Store'};
       if (m.cc) opts.cc = m.cc;
@@ -244,13 +245,31 @@ function obwBuildPlan_() {
       return {name:n,rows:byOwner[n]||[]};
     });
     const date=Utilities.formatDate(feed.fetchedAt,OBW.TIMEZONE,'MMM d, yyyy');
-    messages.push({
-      label:s.label,to:to,cc:cc,rows:rows.length,
-      digestRows:rows.map(function(r){return JSON.stringify(r);}),
-      subject:'Weekly A/R Open Balance - '+s.label+' - '+date,
-      html:obwEmailHtml_(s.label,byMember,feed.fetchedAt,names),
-      plain:obwEmailText_(s.label,byMember,feed.fetchedAt,names)
-    });
+    try {
+      const parts=obwSplitEmailParts_(s.label,byMember,feed.fetchedAt,names);
+      parts.forEach(function(sections,i) {
+        const partLabel=parts.length>1?
+          s.label+' (Part '+(i+1)+' of '+parts.length+')':s.label;
+        const partRows=[];
+        sections.forEach(function(member) {
+          member.rows.forEach(function(r){partRows.push(r);});
+        });
+        const html=obwEmailHtml_(partLabel,sections,feed.fetchedAt,names);
+        const htmlBytes=Utilities.newBlob(html,'text/html').getBytes().length;
+        if(htmlBytes>64*1024) {
+          throw new Error('HTML payload still too large ('+htmlBytes+' bytes) for '+partLabel);
+        }
+        messages.push({
+          label:partLabel,to:to.slice(),cc:cc,rows:partRows.length,
+          digestRows:partRows.map(function(r){return JSON.stringify(r);}),
+          subject:'Weekly A/R Open Balance - '+partLabel+' - '+date,
+          html:html,htmlBytes:htmlBytes,
+          plain:obwEmailText_(partLabel,sections,feed.fetchedAt,names)
+        });
+      });
+    } catch(err) {
+      issues.push('Size validation failed for '+s.label+': '+String(err.message||err));
+    }
   });
   const counted=messages.reduce(function(sum,m){return sum+m.rows;},0);
   if(ownerKey && counted!==records.length) issues.push('Coverage mismatch: '+counted+'/'+records.length+' rows.');
@@ -302,49 +321,114 @@ function obwFetch_() {
   if(!body.data.length)throw new Error('Striven report returned zero rows. NO SEND.');
   return {rows:body.data,fetchedAt:new Date()};
 }
-function obwEmailHtml_(label,byMember,refreshedAt,keys){
+/**
+ * Compact, Gmail-safe HTML.
+ *
+ * The previous version generated huge indented HTML (e.g. 245 KB for
+ * Babz/Bruce on Oct 13). This avoids per-cell multiline markup entirely.
+ * Keeps all 8 columns, all transactions, links, summary and refresh time.
+ */
+function obwEmailHtml_(label,byMember,refreshedAt,keys) {
   const time=Utilities.formatDate(refreshedAt,OBW.TIMEZONE,'MMM d, yyyy h:mm a')+' ET';
-  const content=byMember.map(function(s){
-    const rows=s.rows.slice().sort(function(a,b){
-      return (obwDate_(b[keys.TransactionDate])||0)-(obwDate_(a[keys.TransactionDate])||0);
+  const esc=obwEscape_;
+  const cell='<td style="padding:7px 6px;border-bottom:1px solid #e8e5df">';
+  const moneyCell='<td align="right" style="padding:7px 6px;border-bottom:1px solid #e8e5df;white-space:nowrap">';
+  const link=function(value,url) {
+    const safe=esc(value);
+    return url?'<a href="'+esc(url)+'" style="color:#a44932;text-decoration:underline">'+safe+'</a>':safe;
+  };
+  const sections=byMember.map(function(part) {
+    const rows=part.rows.slice().sort(function(a,b) {
+      return obwDate_(b[keys.TransactionDate])-obwDate_(a[keys.TransactionDate]);
     });
-    if(!rows.length)return '<h3 style="font-size:18px;border-bottom:3px solid #a44932;padding-bottom:6px;">'+obwEscape_(s.name)+'</h3><p>No open transactions in this report.</p>';
-    const invoices=rows.filter(function(r){return String(r[keys.TransactionType]).toUpperCase()==='INVOICE';});
-    const payments=rows.filter(function(r){return String(r[keys.TransactionType]).toUpperCase()==='PAYMENT';});
-    const invoiceOpen=invoices.reduce(function(t,r){return t+Math.max(0,obwAmount_(r[keys.OpenBalance]));},0);
-    const paymentOpen=payments.reduce(function(t,r){return t+obwAmount_(r[keys.OpenBalance]);},0);
-    const h=['Customer #','Customer','Type','Transaction ID','Transaction #','Date','Transaction Amount','Open Balance'];
-    const tableHead=h.map(function(x){return '<th style="padding:10px 8px;background:#272727;color:#fff;text-align:left;font-size:12px;">'+x+'</th>';}).join('');
-    const trs=rows.map(function(r,i){
-      const account=String(r[keys.CustomerNumber]||'').trim();
-      const aid=/^\d+$/.test(account)?'https://classicfireplace.striven.com/CRM/AccountDashboard.aspx?AccountID='+encodeURIComponent(account):'';
-      const id=String(r[keys.TransactionId]||'').trim();
-      const typ=String(r[keys.TransactionType]||'').trim().toUpperCase();
-      const route=typ==='PAYMENT'?'payments':typ==='INVOICE'?'invoices':'';
-      const turl=route&&/^\d+$/.test(id)?'https://classicfireplace.striven.com/next/accounting#/'+route+'/'+id:'';
-      const a=function(value,url){return url?'<a style="color:#7b3f2e;text-decoration:underline;" href="'+obwEscape_(url)+'">'+obwEscape_(value)+'</a>':obwEscape_(value);};
-      const data=[a(account,aid),a(r[keys.CustomerName],aid),obwEscape_(typ),
-        a(id,turl),a(r[keys.TransactionNumber],turl),obwEscape_(r[keys.TransactionDate]),
-        obwMoney_(r[keys.TransactionAmount]),'<strong>'+obwMoney_(r[keys.OpenBalance])+'</strong>'];
-      return '<tr style="background:'+(i%2?'#faf9f7':'#fff')+';">'+data.map(function(v){
-        return '<td style="padding:10px 8px;border-bottom:1px solid #e8e5df;font-size:13px;line-height:1.4;">'+v+'</td>';
-      }).join('')+'</tr>';
+    const title='<div style="font-size:17px;font-weight:bold;border-bottom:2px solid #a44932;padding:7px 0;margin:16px 0 9px">'+esc(part.name)+'</div>';
+    if(!rows.length) return title+'<p style="font-size:13px">No open transactions in this report.</p>';
+    let invoices=0,payments=0;
+    rows.forEach(function(row) {
+      const kind=String(row[keys.TransactionType]||'').trim().toUpperCase();
+      const open=obwAmount_(row[keys.OpenBalance]);
+      if(kind==='INVOICE'&&open>0)invoices+=open;
+      if(kind==='PAYMENT')payments+=open;
+    });
+    const summary='<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 10px">'+
+      '<tr><td style="background:#f7f3ee;padding:9px;border:1px solid #ddd">Open Balance<br><b>'+obwMoney_(invoices)+'</b></td>'+
+      '<td style="background:#f7f3ee;padding:9px;border:1px solid #ddd">Open Payments<br><b>'+obwMoney_(payments)+'</b></td>'+
+      '<td style="background:#f7f3ee;padding:9px;border:1px solid #ddd">Transactions<br><b>'+rows.length+'</b></td></tr></table>';
+    const headers=['Customer #','Customer','Type','Transaction ID','Transaction #','Date','Transaction Amount','Open Balance'];
+    const thead='<tr bgcolor="#272727">'+headers.map(function(h) {
+      return '<th align="'+((h==='Transaction Amount'||h==='Open Balance')?'right':'left')+
+        '" style="padding:8px 6px;color:#fff;font-size:12px">'+h+'</th>';
+    }).join('')+'</tr>';
+    const body=rows.map(function(r,i) {
+      const number=String(r[keys.CustomerNumber]==null?'':r[keys.CustomerNumber]).trim();
+      const account=/^\d+$/.test(number)?
+        'https://classicfireplace.striven.com/CRM/AccountDashboard.aspx?AccountID='+encodeURIComponent(number):'';
+      const id=String(r[keys.TransactionId]==null?'':r[keys.TransactionId]).trim();
+      const type=String(r[keys.TransactionType]||'').trim();
+      const upper=type.toUpperCase();
+      const route=upper==='INVOICE'?'invoices':upper==='PAYMENT'?'payments':'';
+      const tx=route&&/^\d+$/.test(id)?
+        'https://classicfireplace.striven.com/next/accounting#/'+route+'/'+encodeURIComponent(id):'';
+      const data=[
+        link(number,account),link(r[keys.CustomerName],account),esc(type),
+        link(id,tx),link(r[keys.TransactionNumber],tx),esc(r[keys.TransactionDate]),
+        obwMoney_(r[keys.TransactionAmount]),'<b>'+obwMoney_(r[keys.OpenBalance])+'</b>'
+      ];
+      return '<tr'+(i%2?' bgcolor="#faf9f7"':'')+'>'+
+        data.map(function(v,k){return (k>=6?moneyCell:cell)+v+'</td>';}).join('')+'</tr>';
     }).join('');
-    const box=function(k,v){return '<td style="width:33.3%;padding:12px;background:#f7f3ee;border:1px solid #ddd;"><span style="font-size:11px;color:#69645e;">'+k+'</span><div style="font-size:19px;font-weight:bold;">'+v+'</div></td>';};
-    return '<h3 style="font-size:18px;border-bottom:3px solid #a44932;padding-bottom:6px;">'+obwEscape_(s.name)+'</h3>'+
-      '<table width="100%" cellpadding="0" cellspacing="0" style="margin:10px 0 14px;border-collapse:collapse;"><tr>'+
-      box('Open Balance',obwMoney_(invoiceOpen))+box('Open Payments',obwMoney_(paymentOpen))+box('Transactions',String(rows.length))+'</tr></table>'+
-      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-family:Arial,sans-serif;"><thead><tr>'+tableHead+'</tr></thead><tbody>'+trs+'</tbody></table>';
-  }).join('<div style="height:22px;"></div>');
-  return '<div style="background:#f3f1ed;color:#272727;font-family:Arial,Helvetica,sans-serif;padding:14px;">'+
-    '<div style="max-width:1060px;margin:auto;"><div style="background:#272727;color:white;padding:20px 24px;border-bottom:5px solid #a44932;">'+
-    '<div style="font-size:11px;letter-spacing:1px;">CLASSIC FIREPLACE &amp; BBQ STORE</div>'+
-    '<div style="font-size:24px;font-weight:bold;margin-top:5px;">Weekly A/R Open Balance</div>'+
-    '<div style="font-size:13px;margin-top:7px;">'+obwEscape_(label)+'</div></div>'+
-    '<div style="background:white;padding:20px;border:1px solid #dedbd5;">'+
-    '<div style="background:#f3f1ed;border-left:4px solid #a44932;padding:12px;font-size:13px;margin-bottom:20px;">'+
-    '<strong>Report Refreshed at:</strong> '+obwEscape_(time)+'<div style="font-size:12px;margin-top:5px;">Changes made after this time will appear on the next refresh.</div></div>'+
-    content+'</div><div style="text-align:center;padding:12px;color:#888;font-size:11px;">Confidential — Internal A/R information.</div></div></div>';
+    return title+summary+'<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;line-height:1.35">'+
+      '<thead>'+thead+'</thead><tbody>'+body+'</tbody></table>';
+  }).join('');
+  return '<div style="background:#f3f1ed;color:#272727;padding:14px;font-family:Arial,Helvetica,sans-serif">'+
+    '<div style="max-width:1060px;margin:auto">'+
+    '<div style="background:#272727;color:#fff;padding:18px 22px;border-bottom:4px solid #a44932">'+
+    '<div style="font-size:11px;letter-spacing:1px">CLASSIC FIREPLACE &amp; BBQ STORE</div>'+
+    '<div style="font-size:23px;font-weight:bold;margin-top:5px">Weekly A/R Open Balance</div>'+
+    '<div style="font-size:13px;margin-top:7px">'+esc(label)+'</div></div>'+
+    '<div style="background:#fff;border:1px solid #dedbd5;padding:17px">'+
+    '<div style="background:#f3f1ed;border-left:4px solid #a44932;padding:11px;font-size:13px">'+
+    '<b>Report Refreshed at:</b> '+esc(time)+
+    '<div style="font-size:12px;margin-top:5px">Changes made after this time will appear on the next refresh.</div></div>'+
+    sections+'</div><div style="text-align:center;color:#777;font-size:10px;padding:10px">'+
+    'Confidential — Internal A/R information.</div></div></div>';
+}
+
+/**
+ * Partitions very large groups without omitting rows, and guarantees a
+ * conservative 56-KiB HTML ceiling per actual outgoing email.
+ * No extra Striven API requests.
+ */
+function obwSplitEmailParts_(label, sections, refreshedAt, keys) {
+  const limit=56*1024;
+  const getSize=function(parts) {
+    const html=obwEmailHtml_(label,parts,refreshedAt,keys);
+    return Utilities.newBlob(html,'text/html').getBytes().length;
+  };
+  const parts=[];
+  const split=function(input) {
+    if(getSize(input)<=limit) {parts.push(input);return;}
+    const count=input.reduce(function(sum,p){return sum+p.rows.length;},0);
+    if(count<=1) throw new Error(
+      'A single A/R row exceeds the safe email size; no messages sent for '+label+'.'
+    );
+    const half=Math.floor(count/2);
+    let taken=0;
+    const left=[],right=[];
+    input.forEach(function(p) {
+      // Display empty member sections once, never duplicate transactions.
+      if(!p.rows.length) {left.push({name:p.name,rows:[]});return;}
+      const n=Math.max(0,Math.min(p.rows.length,half-taken));
+      if(n>0) left.push({name:p.name,rows:p.rows.slice(0,n)});
+      if(n<p.rows.length) right.push({name:p.name,rows:p.rows.slice(n)});
+      taken+=n;
+    });
+    if(!left.length||!right.length)throw new Error('Unable to split large report '+label);
+    split(left);
+    split(right);
+  };
+  split(sections);
+  return parts;
 }
 function obwEmailText_(label,byMember,refreshedAt,keys) {
   const time=Utilities.formatDate(refreshedAt,OBW.TIMEZONE,'MMM d, yyyy h:mm a')+' ET';
