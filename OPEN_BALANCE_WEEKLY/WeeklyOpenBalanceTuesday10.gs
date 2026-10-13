@@ -46,6 +46,40 @@ function obwPreflight() {
   return result;
 }
 
+/**
+ * ONE-REPORT-CALL OWNERSHIP DIAGNOSTIC. SENDS NO EMAIL.
+ * Summarizes only metadata and counts; logs no customer details or report URL.
+ * This is the next action when obwPreflight() is BLOCKED on SalesRep.
+ */
+function obwAuditOwnerSource() {
+  const report=obwFetch_();
+  const names=Object.keys(report.rows[0]||{});
+  const match=function(k){return names.find(function(n){return obwNorm_(n)===obwNorm_(k);})||'';};
+  const typeField=match('TransactionType');
+  const ownerField=match('SalesRepName')||match('SalesRep');
+  const idField=match('TransactionId');
+  const counts=Object.create(null);
+  let blankOwner=0, missingTransactionIds=0;
+  report.rows.forEach(function(row) {
+    const kind=typeField?String(row[typeField]||'').trim().toUpperCase():'UNKNOWN';
+    counts[kind]=(counts[kind]||0)+1;
+    if(!ownerField||!String(row[ownerField]||'').trim()) blankOwner++;
+    if(!idField||!String(row[idField]||'').trim()) missingTransactionIds++;
+  });
+  const result={
+    ok:true,status:ownerField&&blankOwner===0?'OWNER_FIELD_PRESENT':'OWNER_FIELD_MISSING_OR_INCOMPLETE',
+    sourceRows:report.rows.length, refreshedAt:report.fetchedAt.toISOString(),
+    transactionTypes:counts, reportFields:names,
+    ownerField:ownerField||null, rowsWithoutSalesRep:blankOwner,
+    rowsWithoutTransactionId:missingTransactionIds,
+    paymentApplicationMappingVerified:false,
+    noEmailsSent:true,
+    nextStep:'Invoice owners can be verified using the existing OpenBalanceDistribution.gs function openBalanceResolveInvoiceOwners(). Payment owner routing additionally requires verified invoice-application links; do not certify or schedule while unresolved.'
+  };
+  console.log(JSON.stringify(result));
+  return result;
+}
+
 /** Sets up one recurring Tuesday trigger; refuses to install if preflight fails. */
 function obwInstallTuesday10() {
   const p = obwPreflight();
