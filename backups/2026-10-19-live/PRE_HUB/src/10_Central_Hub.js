@@ -1,0 +1,3462 @@
+/**
+ * STRIVEN CENTRAL DATA HUB
+ * 10_Central_Hub
+ * R1 — 2026-09-09
+ */
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('Central Hub')
+    .addItem('Initialize / Repair Hub','hub_initializeOrRepair')
+    .addSeparator()
+    .addItem('Inventory ALL Enabled Projects','hub_inventoryAllProjects')
+    .addItem('Inventory Registered Sheet Tabs','hub_inventoryRegisteredSheetTabs')
+    .addItem('Rebuild Report Registry','hub_rebuildReportRegistry')
+    .addSeparator()
+    .addItem('Refresh PO Sales Scope','hub_refreshPoSalesScope')
+    .addItem('Refresh PO Inventory Scope','hub_refreshPoInventoryScope')
+    .addItem('Refresh Complete PO Analysis','hub_refreshPoAnalysis')
+    .addSeparator()
+    .addItem('Validate Project Registry','hub_validateProjectRegistry')
+    .addItem('Add Project Source','hub_addProjectSource')
+    .addToUi();
+}
+
+function hub_initializeOrRepair() {
+  const ss = SpreadsheetApp.getActive();
+  Object.keys(HUB_HEADERS).forEach(n => hub_ensureSheet_(ss,n,HUB_HEADERS[n]));
+  HUB_DATA_TABS.forEach(n => hub_ensureDataSheet_(ss,n));
+  hub_seedProjects_(ss);
+  hub_seedDatasets_(ss);
+  hub_seedRefresh_(ss);
+  hub_seedControl_(ss);
+  SpreadsheetApp.flush();
+
+  const missing = Object.keys(HUB_HEADERS).concat(HUB_DATA_TABS)
+    .filter(n => !ss.getSheetByName(n));
+  const result = {
+    ok: !missing.length,
+    version: HUB_VERSION,
+    marker: HUB_MARKER,
+    spreadsheetId: ss.getId(),
+    spreadsheetName: ss.getName(),
+    missing,
+    registeredProjects: Math.max(0,ss.getSheetByName(HUB_SHEETS.PROJECTS).getLastRow()-1)
+  };
+  hub_log_(result.ok?'INFO':'ERROR','INITIALIZE','',
+    result.ok?'Hub initialized/repaired.':'Hub structure incomplete.',JSON.stringify(result));
+  if (!result.ok) throw new Error('Missing Hub sheet(s): '+missing.join(', '));
+  ss.toast('Hub ready. Registered projects: '+result.registeredProjects,'Central Hub',6);
+  return result;
+}
+
+function hub_validateProjectRegistry() {
+  hub_initializeOrRepair();
+  const rows = hub_projects_(), scriptIds={}, sheetIds={}, issues=[];
+  rows.forEach(r => {
+    if (!r.projectName && !r.scriptId && !r.spreadsheetId) return;
+    if (!r.projectName) issues.push('Row '+r.row+': Project Name missing.');
+    if (!r.spreadsheetId) issues.push('Row '+r.row+': Spreadsheet ID missing.');
+    if (!r.scriptId) issues.push('Row '+r.row+': Apps Script Script ID missing.');
+    if (r.scriptId) {
+      if (scriptIds[r.scriptId]) issues.push('Rows '+scriptIds[r.scriptId]+' and '+r.row+': duplicate Script ID.');
+      scriptIds[r.scriptId]=r.row;
+    }
+    if (r.spreadsheetId) {
+      if (sheetIds[r.spreadsheetId]) issues.push('Rows '+sheetIds[r.spreadsheetId]+' and '+r.row+': duplicate Spreadsheet ID.');
+      sheetIds[r.spreadsheetId]=r.row;
+    }
+  });
+  if (issues.length) {
+    hub_log_('WARN','REGISTRY','','Registry validation failed.',issues.join('\n'));
+    throw new Error('PROJECT_REGISTRY validation failed:\n'+issues.join('\n'));
+  }
+  const result={ok:true,registeredProjects:rows.filter(r=>r.projectName).length};
+  hub_log_('INFO','REGISTRY','','Registry validation passed.',JSON.stringify(result));
+  return result;
+}
+
+function hub_addProjectSource() {
+  hub_initializeOrRepair();
+  const ui=SpreadsheetApp.getUi();
+  const name=hub_prompt_(ui,'Project name:'); if(!name)return;
+  const sheetInput=hub_prompt_(ui,'Spreadsheet ID or Google Sheets URL:'); if(!sheetInput)return;
+  const scriptId=hub_prompt_(ui,'Apps Script Script ID:'); if(!scriptId)return;
+  const spreadsheetId=hub_sheetId_(sheetInput);
+  const rows=hub_projects_();
+  if(rows.some(r=>r.scriptId===scriptId)) throw new Error('Script ID already registered.');
+  if(rows.some(r=>r.spreadsheetId===spreadsheetId)) throw new Error('Spreadsheet ID already registered.');
+  SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.PROJECTS).appendRow([
+    true,hub_key_(name),name,spreadsheetId,
+    'https://docs.google.com/spreadsheets/d/'+spreadsheetId+'/edit',
+    scriptId,'REGISTERED','','','','','','','NOT_STARTED','Added through Central Hub'
+  ]);
+  hub_log_('INFO','REGISTRY',name,'Project source added.',scriptId);
+}
+
+function hub_inventoryAllProjects() {
+  hub_initializeOrRepair();
+  hub_validateProjectRegistry();
+  hub_assertAppsScriptApiAccess_();
+
+  const ss=SpreadsheetApp.getActive();
+  const audit=ss.getSheetByName(HUB_SHEETS.API_AUDIT);
+  const projects=hub_projects_().filter(r=>r.enabled&&r.scriptId);
+  const rows=[], scanTime=new Date();
+
+  projects.forEach(p => {
+    try {
+      const content=hub_getProjectContent_(p.scriptId);
+      const files=Array.isArray(content.files)?content.files:[];
+      let refs=[];
+      files.forEach(f => {
+        if(!f||!f.source||String(f.type||'').toUpperCase()==='JSON')return;
+        refs=refs.concat(hub_scanSource_(p,f.name||'(unnamed)',f.source,scanTime));
+      });
+      refs=hub_dedupe_(refs);
+      refs.forEach(r=>rows.push(r));
+      hub_projectScan_(p.row,'INVENTORIED',scanTime,files.length,refs.length,
+        refs.filter(r=>r[6]==='CUSTOM_REPORT').length,
+        refs.filter(r=>r[10]==='DIRECT_READ').length,
+        refs.filter(r=>r[10]==='WRITE').length,'');
+    } catch(e) {
+      hub_projectScan_(p.row,'SCAN_FAILED',scanTime,'','','','','',String(e));
+      hub_log_('ERROR','SOURCE_SCAN',p.projectName,'Project inventory failed.',String(e&&e.stack||e));
+    }
+  });
+
+  hub_replace_(audit,rows);
+  hub_rebuildReportRegistry();
+  const result={ok:true,projectsAttempted:projects.length,apiReferences:rows.length};
+  hub_log_('INFO','SOURCE_SCAN','','Inventory complete.',JSON.stringify(result));
+  ss.toast('Inventory complete: '+rows.length+' API references.','Central Hub',8);
+  return result;
+}
+
+function hub_inventoryRegisteredSheetTabs() {
+  hub_initializeOrRepair();
+  hub_validateProjectRegistry();
+  const ss=SpreadsheetApp.getActive(), out=[];
+  hub_projects_().filter(r=>r.enabled&&r.spreadsheetId).forEach(p=>{
+    try {
+      SpreadsheetApp.openById(p.spreadsheetId).getSheets().forEach(sh=>{
+        const name=sh.getName(), ds=hub_guessDataset_(name);
+        if(!ds && !/striven|inventory|customer|location|task|work\s*order|sales\s*order|transaction|asset|item/i.test(name))return;
+        out.push([p.projectName,name,sh.getMaxRows(),sh.getMaxColumns(),
+          ds||'UNKNOWN',ds?'CENTRALIZE_CANDIDATE':'REVIEW','Collected by Hub']);
+      });
+    } catch(e) {
+      out.push([p.projectName,'(ERROR)','','','UNKNOWN','BLOCKED',String(e)]);
+    }
+  });
+  hub_replace_(ss.getSheetByName(HUB_SHEETS.LOCAL_DATA),out);
+  return {ok:true,candidateTabs:out.length};
+}
+
+function hub_rebuildReportRegistry() {
+  hub_initializeOrRepair();
+  const ss=SpreadsheetApp.getActive(), audit=ss.getSheetByName(HUB_SHEETS.API_AUDIT);
+  const target=ss.getSheetByName(HUB_SHEETS.REPORTS), out=[], seen={};
+  if(audit.getLastRow()<2){hub_replace_(target,[]);return {ok:true,rows:0};}
+  audit.getRange(2,1,audit.getLastRow()-1,HUB_HEADERS.API_DEPENDENCY_AUDIT.length).getValues()
+    .forEach(r=>{
+      const project=String(r[0]||''), file=String(r[3]||''), fn=String(r[4]||'');
+      const type=String(r[6]||''), method=String(r[7]||''), endpoint=String(r[8]||'');
+      const ds=String(r[9]||'UNKNOWN'), cls=String(r[10]||'UNKNOWN'), action=String(r[11]||'REVIEW');
+      if(!endpoint)return;
+      const k=[project,file,fn,type,method,endpoint].join('|'); if(seen[k])return; seen[k]=true;
+      out.push([false,hub_key_(project+'_'+fn+'_'+endpoint),ds,project,file,fn,
+        type==='CUSTOM_REPORT'?'Discovered Custom Report':type,endpoint,method,cls,'','',
+        action,hub_target_(ds),'','','','','DISCOVERED',
+        'Generated from API_DEPENDENCY_AUDIT; validate columns/filters before cutover.']);
+    });
+  hub_replace_(target,out);
+  return {ok:true,rows:out.length};
+}
+
+function hub_assertAppsScriptApiAccess_() {
+  const p=hub_projects_().find(r=>r.enabled&&r.scriptId);
+  if(!p) throw new Error('No enabled project with Script ID is registered.');
+  let content;
+  try { content=hub_getProjectContent_(p.scriptId); }
+  catch(e) {
+    const s=String(e&&e.message||e);
+    if(/403|permission|access|forbidden/i.test(s)) throw new Error(
+      'Apps Script API access is not authorized. Enable Google Apps Script API for the Hub Cloud project and enable Apps Script API access in account settings. '+s);
+    throw e;
+  }
+  const files=Array.isArray(content.files)?content.files.length:0;
+  if(!files) throw new Error('No source files visible for '+p.projectName+'.');
+  const result={ok:true,checkedProject:p.projectName,filesVisible:files};
+  hub_log_('INFO','SCRIPT_API',p.projectName,'Apps Script API access verified.',JSON.stringify(result));
+  return result;
+}
+
+function hub_getProjectContent_(scriptId) {
+  const r=UrlFetchApp.fetch(HUB_SCRIPT_API_BASE+encodeURIComponent(scriptId)+'/content',{
+    method:'get',headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken()},muteHttpExceptions:true
+  });
+  const code=r.getResponseCode(), text=r.getContentText();
+  if(code<200||code>=300) throw new Error('Apps Script API HTTP '+code+': '+hub_limit_(text,1000));
+  const parsed=JSON.parse(text);
+  if(!parsed||!Array.isArray(parsed.files)) throw new Error('Apps Script API response missing files array.');
+  return parsed;
+}
+
+function hub_scanSource_(project,fileName,source,scanTime) {
+  const lines=String(source||'').split(/\r?\n/), out=[]; let fn='';
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i], fm=line.match(/^\s*function\s+([A-Za-z0-9_$]+)\s*\(/); if(fm)fn=fm[1];
+    const window=lines.slice(Math.max(0,i-4),Math.min(lines.length,i+5)).join('\n');
+    const method=hub_method_(window), cls=hub_class_(method,window), ds=hub_guessDataset_(window+' '+fn);
+    const urls=line.match(/https?:\/\/[^\s'"`<>]+/g)||[];
+    urls.forEach(url=>{
+      if(!/striven/i.test(url))return;
+      const type=/custom.?report|report/i.test(url)?'CUSTOM_REPORT':'URL_ENDPOINT';
+      out.push(hub_ref_(project,fileName,fn,i+1,type,method,hub_redact_(url),ds,cls,
+        cls==='WRITE'?'KEEP_DIRECT':type==='CUSTOM_REPORT'?'CENTRALIZE':'REVIEW',line,scanTime,'FOUND'));
+    });
+    const rx=/\b(?:customReportId|custom_report_id|reportId|reportID|report_id)\b\s*[:=]\s*['"]?([A-Za-z0-9_-]{2,})/ig;
+    let m; while((m=rx.exec(line))!==null)
+      out.push(hub_ref_(project,fileName,fn,i+1,'CUSTOM_REPORT',method,m[1],ds,
+        cls==='WRITE'?'WRITE':'DIRECT_READ',cls==='WRITE'?'KEEP_DIRECT':'CENTRALIZE',line,scanTime,'FOUND'));
+    if(/UrlFetchApp\.(?:fetch|fetchAll)\s*\(/.test(line)&&!urls.length)
+      out.push(hub_ref_(project,fileName,fn,i+1,'URLFETCH_CALL',method,'(COMPOSED_OR_VARIABLE_URL)',
+        ds,cls,cls==='WRITE'?'KEEP_DIRECT':'REVIEW',window,scanTime,'REVIEW'));
+  }
+  return out;
+}
+
+function hub_ref_(p,file,fn,line,type,method,endpoint,ds,cls,action,snippet,time,status){
+  return [p.projectName,p.spreadsheetId,p.scriptId,file,fn||'(top-level/unknown)',line,type,
+    method||'UNKNOWN',endpoint,ds||'UNKNOWN',cls,action,hub_redact_(hub_limit_(snippet,1000)),time,status];
+}
+function hub_method_(s){const m=String(s).match(/\bmethod\s*:\s*['"]?(get|post|put|patch|delete)['"]?/i);return m?m[1].toUpperCase():/UrlFetchApp\.(?:fetch|fetchAll)\s*\(/.test(s)?'GET_OR_DEFAULT':'UNKNOWN';}
+function hub_class_(m,s){m=String(m).toUpperCase();return /^(POST|PUT|PATCH|DELETE)$/.test(m)?'WRITE':/api\.striven\.com|custom.?report|UrlFetchApp\./i.test(String(s))?'DIRECT_READ':'UNKNOWN';}
+function hub_guessDataset_(v){const s=String(v||'').toLowerCase();if(/customer.?asset/.test(s))return'CUSTOMER_ASSETS';if(/sales.?order.?detail|so.?detail/.test(s))return'SO_DETAILS';if(/work.?order/.test(s))return'WORK_ORDERS';if(/sales.?order/.test(s))return'SALES_ORDERS';if(/customer.?location|\blocation(s)?\b/.test(s))return'LOCATIONS';if(/\bcontact(s)?\b/.test(s))return'CONTACTS';if(/\bcustomer(s)?\b/.test(s))return'CUSTOMERS';if(/\btransaction(s)?\b|\binvoice(s)?\b/.test(s))return'TRANSACTIONS';if(/\binventory\b/.test(s))return'INVENTORY';if(/\bitem(s)?\b|\bsku\b/.test(s))return'ITEMS';if(/\basset(s)?\b/.test(s))return'ASSETS';if(/\btask(s)?\b/.test(s))return'TASKS';return'';}
+function hub_dedupe_(rows){const s={};return rows.filter(r=>{const k=[r[0],r[3],r[4],r[5],r[6],r[7],r[8]].join('|');if(s[k])return false;s[k]=1;return true;});}
+
+function hub_ensureSheet_(ss,name,headers){
+  let sh=ss.getSheetByName(name); if(!sh)sh=ss.insertSheet(name);
+  if(sh.getMaxColumns()<headers.length)sh.insertColumnsAfter(sh.getMaxColumns(),headers.length-sh.getMaxColumns());
+  const live=sh.getRange(1,1,1,headers.length).getDisplayValues()[0], blank=live.every(v=>!String(v).trim());
+  if(blank)sh.getRange(1,1,1,headers.length).setValues([headers]);
+  else {const i=headers.findIndex((h,x)=>String(live[x]||'').trim()!==h);if(i>=0)throw new Error('Unexpected header in '+name+' column '+(i+1)+'.');}
+  sh.setFrozenRows(1); sh.getRange(1,1,1,headers.length).setFontWeight('bold').setFontColor('#FFFFFF').setBackground('#1F4E78').setWrap(true);
+}
+function hub_ensureDataSheet_(ss,name){let sh=ss.getSheetByName(name);if(!sh)sh=ss.insertSheet(name);if(!String(sh.getRange('A1').getDisplayValue()).trim())sh.getRange('A1:B4').setValues([['Status','SCHEMA_PENDING_SOURCE_AUDIT'],['Last Refreshed',''],['Source Report(s)',''],['Rule','Do not populate until source audit confirms canonical schema.']]);}
+function hub_seedProjects_(ss){const sh=ss.getSheetByName(HUB_SHEETS.PROJECTS);if(sh.getLastRow()>1)return;const r=HUB_DEFAULT_PROJECTS.map(p=>[true,p.key,p.name,p.spreadsheetId,p.spreadsheetUrl,p.scriptId,'REGISTERED','','','','','','','NOT_STARTED','Initial source']);sh.getRange(2,1,r.length,r[0].length).setValues(r);}
+function hub_seedDatasets_(ss){const sh=ss.getSheetByName(HUB_SHEETS.DATASETS);if(sh.getLastRow()>1)return;sh.getRange(2,1,HUB_DEFAULT_DATASETS.length,HUB_DEFAULT_DATASETS[0].length).setValues(HUB_DEFAULT_DATASETS);}
+function hub_seedRefresh_(ss){const sh=ss.getSheetByName(HUB_SHEETS.REFRESH),reg=ss.getSheetByName(HUB_SHEETS.DATASETS);if(sh.getLastRow()>1)return;const r=reg.getRange(2,1,reg.getLastRow()-1,2).getValues().map(x=>[false,x[0],x[1],'PENDING','','','','','','','','','','DISABLED_UNTIL_SOURCE_AUDIT','']);if(r.length)sh.getRange(2,1,r.length,r[0].length).setValues(r);}
+function hub_seedControl_(ss){const sh=ss.getSheetByName(HUB_SHEETS.CONTROL);if(sh.getLastRow()>1)return;const r=[['Hub Version',HUB_VERSION],['Marker',HUB_MARKER],['Purpose','Centralize repeated Striven bulk reads.'],['Safety Rule','No project cutover before validation.'],['Phase','Inventory / duplicate detection / migration planning'],['Refresh State','DISABLED_UNTIL_SOURCE_AUDIT'],['Last Initialize',new Date()]];sh.getRange(2,1,r.length,2).setValues(r);}
+
+function hub_projects_(){
+  const sh=SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.PROJECTS),v=sh.getDataRange().getValues();
+  if(v.length<2)return[];const h=v[0].map(String),i={};h.forEach((x,n)=>i[x.trim()]=n);
+  ['Enabled','Project Name','Spreadsheet ID','Apps Script Script ID'].forEach(x=>{if(i[x]==null)throw new Error('PROJECT_REGISTRY missing header: '+x);});
+  return v.slice(1).map((r,n)=>({row:n+2,enabled:r[i.Enabled]===true||String(r[i.Enabled]).toUpperCase()==='TRUE',
+    projectName:String(r[i['Project Name']]||''),spreadsheetId:String(r[i['Spreadsheet ID']]||''),scriptId:String(r[i['Apps Script Script ID']]||'')}));
+}
+function hub_projectScan_(row,status,time,files,refs,reports,reads,writes,note){
+  const sh=SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.PROJECTS),h=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0],m={};h.forEach((x,i)=>m[x]=i+1);
+  const u={'Connection Status':status,'Last Inventory Scan':time,'Code Files':files,'API References':refs,'Custom Reports':reports,'Direct Reads':reads,'Writes':writes};
+  Object.keys(u).forEach(k=>{if(m[k])sh.getRange(row,m[k]).setValue(u[k]);});if(note&&m.Notes)sh.getRange(row,m.Notes).setValue(note);
+}
+function hub_replace_(sh,rows){const n=sh.getLastRow();if(n>1)sh.getRange(2,1,n-1,Math.max(sh.getLastColumn(),1)).clearContent();if(rows&&rows.length)sh.getRange(2,1,rows.length,rows[0].length).setValues(rows);}
+function hub_prompt_(ui,prompt){const r=ui.prompt('Add Project Source',prompt,ui.ButtonSet.OK_CANCEL);if(r.getSelectedButton()!==ui.Button.OK)return'';return String(r.getResponseText()||'').trim();}
+function hub_sheetId_(v){const s=String(v||'').trim(),m=s.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);if(m)return m[1];if(/^[A-Za-z0-9_-]{20,}$/.test(s))return s;throw new Error('Invalid Spreadsheet ID/URL.');}
+function hub_key_(v){return String(v||'').toUpperCase().replace(/[^A-Z0-9]+/g,'_').replace(/^_+|_+$/g,'').substring(0,120);}
+function hub_target_(d){const m={CUSTOMERS:'DATA_CUSTOMERS',CONTACTS:'DATA_CONTACTS',LOCATIONS:'DATA_LOCATIONS',ITEMS:'DATA_ITEMS',INVENTORY:'DATA_INVENTORY',ASSETS:'DATA_ASSETS',CUSTOMER_ASSETS:'DATA_CUSTOMER_ASSETS',TASKS:'DATA_TASKS',WORK_ORDERS:'DATA_WORK_ORDERS',SALES_ORDERS:'DATA_SALES_ORDERS',SO_DETAILS:'DATA_SO_DETAILS',TRANSACTIONS:'DATA_TRANSACTIONS'};return m[String(d||'').toUpperCase()]||'';}
+function hub_redact_(v){let s=String(v==null?'':v);s=s.replace(/(authorization\s*[:=]\s*['"]?\s*bearer\s+)[A-Za-z0-9._~+\/=-]+/ig,'$1[REDACTED]');s=s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g,'[REDACTED_KEY]');s=s.replace(/([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,'$1[REDACTED]');s=s.replace(/(\b(?:api[_-]?key|apikey|token|secret|password|authorization)\b\s*[:=]\s*['"])[^'"]+(['"])/ig,'$1[REDACTED]$2');return s;}
+function hub_limit_(v,n){const s=String(v==null?'':v);return s.length<=n?s:s.substring(0,n)+'...';}
+function hub_log_(level,area,subject,message,details){const sh=SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.SYSTEM_LOG);if(sh)sh.appendRow([new Date(),level,area,subject,message,hub_limit_(details,4000)]);}
+
+/* =========================
+ * STANDARD ITEMS DATASET
+ * R1.2 — manual refresh only
+ * ========================= */
+
+/**
+ * Canonical Items schema.
+ *
+ * Mandatory rule:
+ * every field has a canonical Hub name AND an alias set.
+ * Alias matching handles naming differences only; it never merges
+ * fields with different business meanings.
+ */
+function hub_stdItemsSchema_() {
+  return [
+    {canonical:'ItemNumber', aliases:['ItemNumber','Item Number','Item_Number','ItemNo','Item No']},
+    {canonical:'Id', aliases:['Id','ItemId','ItemID','Item Id','Item_Id']},
+    {canonical:'ItemName', aliases:['ItemName','Item Name','Item_Name']},
+    {canonical:'ItemCategory', aliases:['ItemCategory','Item Category','Item_Category','Category']},
+    {canonical:'Cost', aliases:['Cost','ItemCost','Item Cost','Item_Cost']},
+    {canonical:'Price', aliases:['Price','ItemPrice','Item Price','Item_Price']},
+    {canonical:'MAPPricing', aliases:['MAPPricing','MAP Pricing','MAP_Pricing','MAPPrice','MAP Price','MAP_Price']},
+    {canonical:'Taxable', aliases:['Taxable','ItemTaxable','Item Taxable','Item_Taxable']},
+    {canonical:'ItemType', aliases:['ItemType','Item Type','Item_Type']},
+    {canonical:'PreferredVendor', aliases:['PreferredVendor','Preferred Vendor','Preferred_Vendor','PreferredVendorName','Preferred Vendor Name']},
+    {canonical:'Description', aliases:['Description','ItemDescription','Item Description','Item_Description']},
+    {canonical:'Manufacturer', aliases:['Manufacturer','ManufacturerName','Manufacturer Name','Manufacturer_Name']},
+    {canonical:'LocationName', aliases:['LocationName','Location Name','Location_Name','InventoryLocation','Inventory Location','Inventory_Location']},
+    {canonical:'ItemsSKU', aliases:['ItemsSKU','ItemSKU','Items SKU','Item SKU','Items_SKU','Item_SKU','SKU']},
+    {canonical:'ItemsUPC', aliases:['ItemsUPC','ItemUPC','Items UPC','Item UPC','Items_UPC','Item_UPC','UPC']}
+  ];
+}
+
+function hub_stdItemsHeaders_() {
+  return hub_stdItemsSchema_().map(function(def) { return def.canonical; });
+}
+
+/**
+ * Manual production refresh for the canonical Items dataset.
+ *
+ * Safety:
+ * - reads only from Striven
+ * - writes only to this Hub's DATA_ITEMS / logs / refresh control
+ * - fetches + validates the complete report before replacing DATA_ITEMS
+ * - existing DATA_ITEMS remains intact if the remote fetch fails
+ * - does not modify any registered source project
+ */
+function hub_refreshStdItems() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('STD Items refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const runId = 'STD_ITEMS_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let pageCalls = 0;
+  let rowsFetched = 0;
+
+  try {
+    hub_initializeOrRepair();
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+    const reportUrl = String(props.getProperty('STRIVEN_STD_ITEMS_REPORT_URL') || '').trim();
+
+    const missingProps = [];
+    if (!clientId) missingProps.push('CLIENT_ID');
+    if (!clientSecret) missingProps.push('CLIENT_SECRET');
+    if (!reportUrl) missingProps.push('STRIVEN_STD_ITEMS_REPORT_URL');
+    if (missingProps.length) {
+      throw new Error('Missing Script Properties: ' + missingProps.join(', '));
+    }
+    if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
+      throw new Error('STRIVEN_STD_ITEMS_REPORT_URL must use https://api.striven.com/.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    const token = tokenInfo.accessToken;
+
+    const schema = hub_stdItemsSchema_();
+    const canonicalHeaders = hub_stdItemsHeaders_();
+    const pageSize = 500;
+    const maxPages = 500;
+
+    const canonicalRows = [];
+    let sourceMap = null;
+
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+      const payload = hub_stdItemsFetchPage_(reportUrl, token, pageIndex, pageSize);
+      pageCalls++;
+
+      const pageRows = hub_stdItemsExtractRows_(payload);
+
+      if (!pageRows.length) {
+        break;
+      }
+
+      if (!sourceMap) {
+        sourceMap = hub_buildCanonicalSourceMap_(pageRows[0], schema, false);
+      }
+
+      for (let i = 0; i < pageRows.length; i++) {
+        const row = pageRows[i];
+        const rowMap = hub_buildCanonicalSourceMap_(row, schema, false);
+
+        // Prevent silent schema drift within later pages/rows.
+        canonicalHeaders.forEach(function(canonical) {
+          if (rowMap[canonical] !== sourceMap[canonical]) {
+            throw new Error(
+              'STD Items schema drift detected for canonical field "' + canonical +
+              '" on page ' + pageIndex + ', row ' + (i + 1) +
+              '. First source field="' + sourceMap[canonical] +
+              '", current source field="' + rowMap[canonical] + '".'
+            );
+          }
+        });
+
+        canonicalRows.push(
+          canonicalHeaders.map(function(canonical) {
+            const sourceField = sourceMap[canonical];
+            const value = row[sourceField];
+            return value == null ? '' : value;
+          })
+        );
+      }
+
+      rowsFetched += pageRows.length;
+
+      if (pageRows.length < pageSize) {
+        break;
+      }
+
+      if (pageIndex === maxPages - 1) {
+        throw new Error(
+          'STD Items refresh reached the safety limit of ' + maxPages +
+          ' pages without reaching the end of the report.'
+        );
+      }
+    }
+
+    if (!canonicalRows.length) {
+      throw new Error('STD Items report returned zero rows. DATA_ITEMS was not replaced.');
+    }
+
+    if (!sourceMap) {
+      throw new Error('STD Items source schema could not be resolved.');
+    }
+
+    // Replace DATA_ITEMS only AFTER the entire remote report is fetched and validated.
+    hub_writeCanonicalDataset_(
+      SpreadsheetApp.getActive().getSheetByName('DATA_ITEMS'),
+      canonicalHeaders,
+      canonicalRows
+    );
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_updateRefreshControl_(
+      'ITEMS',
+      true,
+      canonicalRows.length,
+      pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      durationSec,
+      'SUCCESS',
+      ''
+    );
+
+    hub_apiUsage_(
+      runId,
+      'ITEMS',
+      'STRIVEN_STD_ITEMS_REPORT_URL',
+      'GET',
+      pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      canonicalRows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshStdItems'
+    );
+
+    const sourceToCanonical = {};
+    Object.keys(sourceMap).forEach(function(canonical) {
+      sourceToCanonical[sourceMap[canonical]] = canonical;
+    });
+
+    const result = {
+      status: 'PASS',
+      dataset: 'ITEMS',
+      targetSheet: 'DATA_ITEMS',
+      rows: canonicalRows.length,
+      reportPageCalls: pageCalls,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      totalApiCallsThisRun: pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      durationSec: durationSec,
+      canonicalFields: canonicalHeaders,
+      sourceToCanonical: sourceToCanonical,
+      strivenWritesPerformed: false,
+      sourceProjectsModified: false
+    };
+
+    hub_log_(
+      'INFO',
+      'STD_ITEMS_REFRESH',
+      'ITEMS',
+      'Standard Items refresh completed.',
+      JSON.stringify(result)
+    );
+
+    return result;
+
+  } catch (err) {
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const safeError = hub_limit_(String(err && err.message || err), 1000);
+
+    try {
+      hub_updateRefreshControl_(
+        'ITEMS',
+        false,
+        rowsFetched,
+        pageCalls,
+        durationSec,
+        'FAILED',
+        safeError
+      );
+      hub_apiUsage_(
+        runId,
+        'ITEMS',
+        'STRIVEN_STD_ITEMS_REPORT_URL',
+        'GET',
+        pageCalls,
+        rowsFetched,
+        durationSec,
+        'FAILED',
+        safeError,
+        'hub_refreshStdItems'
+      );
+      hub_log_(
+        'ERROR',
+        'STD_ITEMS_REFRESH',
+        'ITEMS',
+        'Standard Items refresh failed; previous DATA_ITEMS retained.',
+        safeError
+      );
+    } catch (loggingErr) {
+      // Do not mask the original failure with a secondary logging failure.
+    }
+
+    throw err;
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Reuse the Striven access token from Script Properties until near expiry.
+ * No credential/token value is written to logs.
+ */
+function hub_strivenAccessToken_(clientId, clientSecret) {
+  const props = PropertiesService.getScriptProperties();
+  const tokenKey = 'HUB_STRIVEN_ACCESS_TOKEN';
+  const expiryKey = 'HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS';
+
+  const cachedToken = String(props.getProperty(tokenKey) || '');
+  const expiryMs = Number(props.getProperty(expiryKey) || 0);
+  const now = Date.now();
+
+  // Keep a 5-minute safety margin.
+  if (cachedToken && expiryMs > now + 5 * 60 * 1000) {
+    return {
+      accessToken: cachedToken,
+      requestedNewToken: false
+    };
+  }
+
+  const basic = Utilities.base64Encode(clientId + ':' + clientSecret);
+  const response = UrlFetchApp.fetch('https://api.striven.com/accesstoken', {
+    method: 'post',
+    headers: {
+      Authorization: 'Basic ' + basic,
+      Accept: 'application/json'
+    },
+    payload: {
+      grant_type: 'client_credentials',
+      ClientId: clientId
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Striven OAuth failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error('Striven OAuth returned non-JSON content.');
+  }
+
+  if (!parsed || !parsed.access_token) {
+    throw new Error('Striven OAuth response did not contain access_token.');
+  }
+
+  const expiresIn = Number(parsed.expires_in);
+  if (!isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error('Striven OAuth response did not contain a valid expires_in value.');
+  }
+
+  props.setProperties({
+    [tokenKey]: String(parsed.access_token),
+    [expiryKey]: String(now + expiresIn * 1000)
+  }, false);
+
+  return {
+    accessToken: String(parsed.access_token),
+    requestedNewToken: true
+  };
+}
+
+function hub_stdItemsFetchPage_(reportUrl, token, pageIndex, pageSize) {
+  const url = hub_reportPagedUrl_(reportUrl, pageIndex, pageSize);
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    // A stale stored token should be cleared so the next execution obtains a new one.
+    PropertiesService.getScriptProperties().deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    PropertiesService.getScriptProperties().deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'STD Items report fetch failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error('STD Items report returned non-JSON content.');
+  }
+}
+
+function hub_reportPagedUrl_(reportUrl, pageIndex, pageSize) {
+  let url = String(reportUrl || '').trim();
+
+  url = url
+    .replace(/([?&])pageIndex=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/([?&])pageSize=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/[?&]$/, '');
+
+  const separator = url.indexOf('?') >= 0 ? '&' : '?';
+  return url +
+    separator + 'pageIndex=' + encodeURIComponent(pageIndex) +
+    '&pageSize=' + encodeURIComponent(pageSize);
+}
+
+function hub_stdItemsExtractRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data,
+    payload.Data,
+    payload.results,
+    payload.Results,
+    payload.items,
+    payload.Items,
+    payload.rows,
+    payload.Rows,
+    payload.records,
+    payload.Records
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  const keys = Object.keys(payload);
+  for (let i = 0; i < keys.length; i++) {
+    const value = payload[keys[i]];
+    if (
+      Array.isArray(value) &&
+      value.length &&
+      typeof value[0] === 'object' &&
+      !Array.isArray(value[0])
+    ) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Returns canonical -> actual source-field map.
+ * Throws on missing or ambiguous canonical mappings.
+ */
+function hub_buildCanonicalSourceMap_(row, schema, allowExtras) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error('Cannot resolve aliases from a non-object report row.');
+  }
+
+  const actualKeys = Object.keys(row);
+  const normToRaw = {};
+
+  actualKeys.forEach(function(raw) {
+    const normalized = hub_normalizeFieldName_(raw);
+    if (!normToRaw[normalized]) normToRaw[normalized] = [];
+    normToRaw[normalized].push(raw);
+  });
+
+  const map = {};
+  const acceptedNorms = {};
+  const missing = [];
+  const ambiguous = [];
+
+  schema.forEach(function(def) {
+    const matches = [];
+
+    def.aliases.forEach(function(alias) {
+      const normalized = hub_normalizeFieldName_(alias);
+      acceptedNorms[normalized] = true;
+      (normToRaw[normalized] || []).forEach(function(raw) {
+        if (matches.indexOf(raw) < 0) matches.push(raw);
+      });
+    });
+
+    if (matches.length === 0) {
+      missing.push(def.canonical);
+    } else if (matches.length > 1) {
+      ambiguous.push(def.canonical + ' <= ' + matches.join('|'));
+    } else {
+      map[def.canonical] = matches[0];
+    }
+  });
+
+  const unexpected = actualKeys.filter(function(raw) {
+    return !acceptedNorms[hub_normalizeFieldName_(raw)];
+  });
+
+  if (
+    missing.length ||
+    ambiguous.length ||
+    (!allowExtras && unexpected.length) ||
+    Object.keys(map).length !== schema.length
+  ) {
+    throw new Error(
+      'Canonical schema validation failed. ' +
+      'Missing=' + missing.join('|') +
+      '; Ambiguous=' + ambiguous.join('|') +
+      '; Unexpected=' + unexpected.join('|')
+    );
+  }
+
+  return map;
+}
+
+function hub_normalizeFieldName_(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toLowerCase();
+}
+
+function hub_writeCanonicalDataset_(sheet, headers, rows) {
+  if (!sheet) {
+    throw new Error('Target canonical dataset sheet is missing.');
+  }
+  if (!headers || !headers.length) {
+    throw new Error('Canonical dataset headers are empty.');
+  }
+
+  const neededRows = rows.length + 1;
+  if (sheet.getMaxRows() < neededRows) {
+    sheet.insertRowsAfter(sheet.getMaxRows(), neededRows - sheet.getMaxRows());
+  }
+  if (sheet.getMaxColumns() < headers.length) {
+    sheet.insertColumnsAfter(
+      sheet.getMaxColumns(),
+      headers.length - sheet.getMaxColumns()
+    );
+  }
+
+  const clearRows = Math.max(sheet.getLastRow(), neededRows);
+  sheet.getRange(1, 1, clearRows, headers.length).clearContent();
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold')
+    .setFontColor('#FFFFFF')
+    .setBackground('#1F4E78')
+    .setWrap(true);
+
+  const chunkSize = 5000;
+  for (let offset = 0; offset < rows.length; offset += chunkSize) {
+    const chunk = rows.slice(offset, offset + chunkSize);
+    sheet.getRange(offset + 2, 1, chunk.length, headers.length).setValues(chunk);
+  }
+}
+
+function hub_updateRefreshControl_(
+  datasetKey,
+  success,
+  rows,
+  apiCalls,
+  durationSec,
+  status,
+  error
+) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.REFRESH);
+  if (!sh || sh.getLastRow() < 2) return;
+
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = {};
+  headers.forEach(function(h, i) { idx[String(h)] = i; });
+
+  const data = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  const rowIndex = data.findIndex(function(r) {
+    return String(r[idx['Dataset Key']] || '').toUpperCase() === String(datasetKey).toUpperCase();
+  });
+  if (rowIndex < 0) return;
+
+  const targetRow = rowIndex + 2;
+  const now = new Date();
+
+  const updates = {
+    'Last Attempt': now,
+    'Rows': rows,
+    'API Calls': apiCalls,
+    'Duration Sec': durationSec,
+    'Status': status,
+    'Error': error || ''
+  };
+  if (success) updates['Last Success'] = now;
+
+  Object.keys(updates).forEach(function(header) {
+    if (idx[header] != null) {
+      sh.getRange(targetRow, idx[header] + 1).setValue(updates[header]);
+    }
+  });
+}
+
+function hub_apiUsage_(
+  runId,
+  datasetKey,
+  reportLabel,
+  method,
+  calls,
+  rows,
+  durationSec,
+  result,
+  error,
+  caller
+) {
+  const sh = SpreadsheetApp.getActive().getSheetByName(HUB_SHEETS.API_USAGE);
+  if (!sh) return;
+
+  sh.appendRow([
+    new Date(),
+    runId,
+    datasetKey,
+    reportLabel,
+    method,
+    calls,
+    rows,
+    durationSec,
+    result,
+    error || '',
+    caller
+  ]);
+}
+
+function hub_safeExternalText_(value, maxLen) {
+  let s = String(value == null ? '' : value);
+
+  s = s.replace(
+    /(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,
+    '$1[REDACTED]'
+  );
+  s = s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED_KEY]');
+  s = s.replace(
+    /([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,
+    '$1[REDACTED]'
+  );
+
+  return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+}
+
+/* === HUB_STD_CONTACTS_R1_4_BEGIN ===
+ * STD - Customer Contacts - Central Hub
+ * Production full refresh.
+ *
+ * SAFETY:
+ * - READS Striven custom report only.
+ * - WRITES only this Hub's DATA_CONTACTS sheet.
+ * - Does not modify registered source projects.
+ * - Does not POST/PATCH/PUT/DELETE to Striven.
+ *
+ * BUSINESS RULES:
+ * - Report is filtered in Striven to Active customers only.
+ * - Customer ID = Customer Number in this tenant.
+ * - CustomerPrimaryEmail is derived from ContactPrimaryEmail where needed.
+ * - ContactDateCreated and ContactStatus are intentionally not required.
+ */
+
+function hub_refreshStdContacts() {
+  const startedMs = Date.now();
+  const lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(10000)) {
+    throw new Error('STD Contacts refresh is already running.');
+  }
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+    const reportUrl = String(props.getProperty('STRIVEN_STD_CONTACTS_REPORT_URL') || '').trim();
+
+    const missingProperties = [];
+    if (!clientId) missingProperties.push('CLIENT_ID');
+    if (!clientSecret) missingProperties.push('CLIENT_SECRET');
+    if (!reportUrl) missingProperties.push('STRIVEN_STD_CONTACTS_REPORT_URL');
+
+    if (missingProperties.length) {
+      throw new Error('Missing Script Properties: ' + missingProperties.join(', '));
+    }
+
+    if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
+      throw new Error('STRIVEN_STD_CONTACTS_REPORT_URL must use https://api.striven.com/.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    const fetched = hub_fetchStdContactsAllPages_(reportUrl, tokenInfo.accessToken, 500);
+
+    if (!fetched.rows.length) {
+      throw new Error('STD Contacts report returned zero rows. DATA_CONTACTS was not replaced.');
+    }
+
+    const schema = hub_stdContactsSchema_();
+    const audit = hub_auditStdContactsSchema_(fetched.actualFields, schema);
+
+    if (
+      audit.missingCanonicalFields.length ||
+      audit.ambiguousCanonicalFields.length ||
+      audit.unexpectedSourceFields.length ||
+      fetched.actualFields.length !== schema.length
+    ) {
+      throw new Error(
+        'STD Contacts schema validation failed. ' +
+        JSON.stringify({
+          expectedCanonicalFieldCount: schema.length,
+          actualFieldCount: fetched.actualFields.length,
+          actualFields: fetched.actualFields,
+          missingCanonicalFields: audit.missingCanonicalFields,
+          ambiguousCanonicalFields: audit.ambiguousCanonicalFields,
+          unexpectedSourceFields: audit.unexpectedSourceFields
+        })
+      );
+    }
+
+    const seenKeys = {};
+    let duplicateCustomerContactKeys = 0;
+    let missingCustomerIds = 0;
+    let missingContactIds = 0;
+
+    const records = fetched.rows.map(function(source) {
+      const record = hub_buildStdContactRecord_(source, audit.canonicalToSource);
+
+      if (!record.CustomerId) missingCustomerIds++;
+      if (!record.ContactId) missingContactIds++;
+
+      if (record.CustomerContactKey) {
+        if (seenKeys[record.CustomerContactKey]) duplicateCustomerContactKeys++;
+        else seenKeys[record.CustomerContactKey] = true;
+      }
+
+      return record;
+    });
+
+    if (missingCustomerIds || missingContactIds) {
+      throw new Error(
+        'STD Contacts contains required-ID gaps. ' +
+        JSON.stringify({
+          missingCustomerIds: missingCustomerIds,
+          missingContactIds: missingContactIds
+        })
+      );
+    }
+
+    if (duplicateCustomerContactKeys) {
+      throw new Error(
+        'STD Contacts contains duplicate Customer+Contact relationships. Count=' +
+        duplicateCustomerContactKeys
+      );
+    }
+
+    const headers = hub_stdContactsHeaders_();
+    const values = records.map(function(record) {
+      return headers.map(function(header) {
+        return record[header] == null ? '' : record[header];
+      });
+    });
+
+    const sh = SpreadsheetApp.getActive().getSheetByName('DATA_CONTACTS');
+    if (!sh) throw new Error('DATA_CONTACTS sheet is missing.');
+
+    hub_replaceStdContactsSheet_(sh, headers, values);
+
+    const result = {
+      status: 'PASS',
+      dataset: 'CONTACTS',
+      targetSheet: 'DATA_CONTACTS',
+      rows: records.length,
+      sourceCanonicalFieldCount: schema.length,
+      outputColumnCount: headers.length,
+      reportPageCalls: fetched.pageCalls,
+      pageSize: fetched.pageSize,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      totalApiCallsThisRun: fetched.pageCalls + (tokenInfo.requestedNewToken ? 1 : 0),
+      sourceToCanonical: audit.sourceToCanonical,
+      canonicalToSource: audit.canonicalToSource,
+      duplicateCustomerContactKeys: duplicateCustomerContactKeys,
+      missingCustomerIds: missingCustomerIds,
+      missingContactIds: missingContactIds,
+      derivedFields: [
+        'CustomerNumber',
+        'CustomerStatus',
+        'CustomerPrimaryEmail',
+        'NormalizedCustomerPhone',
+        'NormalizedCustomerEmail',
+        'CustomerCity',
+        'NormalizedCustomerAddress',
+        'NormalizedContactEmail',
+        'NormalizedContactPhone',
+        'ContactPhoneExtension',
+        'ContactCity',
+        'NormalizedContactAddress',
+        'EntityType',
+        'EntityId',
+        'CustomerContactKey'
+      ],
+      filterExpectation: 'Customer Status = Active in the Striven report definition.',
+      strivenWritesPerformed: false,
+      sourceProjectsModified: false,
+      elapsedMs: Date.now() - startedMs
+    };
+
+    Logger.log(JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_stdContactsSchema_() {
+  return [
+    {
+      canonical: 'CustomerDateCreated',
+      aliases: [
+        'CustomerDateCreated', 'Customer Date Created',
+        'CustomerCreatedOn', 'Customer Created On',
+        'CustomerCreatedAt', 'Customer Created At'
+      ]
+    },
+    {
+      canonical: 'CustomerId',
+      aliases: [
+        'CustomerId', 'CustomerID', 'Customer Id', 'Customer ID',
+        'CustomerCustomerId', 'CustomerCustomerID',
+        'CustomerNumber', 'Customer Number'
+      ]
+    },
+    {
+      canonical: 'CustomerName',
+      aliases: [
+        'CustomerName', 'Customer Name',
+        'CustomerFullName', 'Customer Full Name',
+        'CustomerCustomerName'
+      ]
+    },
+    {
+      canonical: 'CustomerPrimaryPhone',
+      aliases: [
+        'CustomerPrimaryPhone', 'Customer Primary Phone',
+        'CustomerPhone', 'Customer Phone'
+      ]
+    },
+    {
+      canonical: 'CustomerFullAddress',
+      aliases: [
+        'CustomerFullAddress', 'Customer Full Address',
+        'CustomerAddressFullAddress', 'Customer Address Full Address',
+        'CustomerAddress'
+      ]
+    },
+    {
+      canonical: 'ContactId',
+      aliases: [
+        'ContactId', 'ContactID', 'Contact Id', 'Contact ID'
+      ]
+    },
+    {
+      canonical: 'FirstName',
+      aliases: [
+        'FirstName', 'First Name',
+        'ContactFirstName', 'Contact First Name'
+      ]
+    },
+    {
+      canonical: 'LastName',
+      aliases: [
+        'LastName', 'Last Name',
+        'ContactLastName', 'Contact Last Name'
+      ]
+    },
+    {
+      canonical: 'ContactFullName',
+      aliases: [
+        'ContactFullName', 'Contact Full Name',
+        'FullName', 'Full Name',
+        'ContactName', 'Contact Name'
+      ]
+    },
+    {
+      canonical: 'ContactPrimaryEmail',
+      aliases: [
+        'ContactPrimaryEmail', 'Contact Primary Email',
+        'PrimaryEmail', 'Primary Email',
+        'ContactEmail', 'Contact Email'
+      ]
+    },
+    {
+      canonical: 'ContactPrimaryPhone',
+      aliases: [
+        'ContactPrimaryPhone', 'Contact Primary Phone',
+        'PrimaryPhone', 'Primary Phone',
+        'ContactPhone', 'Contact Phone'
+      ]
+    },
+    {
+      canonical: 'ContactFullAddress',
+      aliases: [
+        'ContactFullAddress', 'Contact Full Address',
+        'ContactAddressFullAddress', 'Contact Address Full Address',
+        'AddressFullAddress', 'Address Full Address'
+      ]
+    }
+  ];
+}
+
+function hub_stdContactsHeaders_() {
+  return [
+    'CustomerDateCreated',
+    'CustomerId',
+    'CustomerNumber',
+    'CustomerName',
+    'CustomerStatus',
+    'CustomerPrimaryPhone',
+    'NormalizedCustomerPhone',
+    'CustomerPrimaryEmail',
+    'NormalizedCustomerEmail',
+    'CustomerFullAddress',
+    'CustomerCity',
+    'NormalizedCustomerAddress',
+    'ContactId',
+    'FirstName',
+    'LastName',
+    'ContactFullName',
+    'ContactPrimaryEmail',
+    'NormalizedContactEmail',
+    'ContactPrimaryPhone',
+    'NormalizedContactPhone',
+    'ContactPhoneExtension',
+    'ContactFullAddress',
+    'ContactCity',
+    'NormalizedContactAddress',
+    'EntityType',
+    'EntityId',
+    'CustomerContactKey'
+  ];
+}
+
+function hub_fetchStdContactsAllPages_(reportUrl, accessToken, pageSize) {
+  const rows = [];
+  const fieldSet = {};
+  const maxPages = 500;
+  let pageCalls = 0;
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    const pageUrl = hub_stdContactsPagedUrl_(reportUrl, pageIndex, pageSize);
+
+    const response = UrlFetchApp.fetch(pageUrl, {
+      method: 'get',
+      headers: {
+        Authorization: 'Bearer ' + accessToken,
+        Accept: 'application/json'
+      },
+      muteHttpExceptions: true
+    });
+
+    pageCalls++;
+
+    const code = response.getResponseCode();
+    const text = response.getContentText();
+
+    if (code < 200 || code >= 300) {
+      throw new Error(
+        'STD Contacts report page ' + pageIndex + ' failed HTTP ' + code + ': ' +
+        hub_stdContactsSafeText_(text, 500)
+      );
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (e) {
+      throw new Error('STD Contacts page ' + pageIndex + ' returned non-JSON content.');
+    }
+
+    const pageRows = hub_stdContactsExtractRows_(payload);
+
+    pageRows.forEach(function(row) {
+      Object.keys(row || {}).forEach(function(key) {
+        fieldSet[key] = true;
+      });
+      rows.push(row);
+    });
+
+    if (pageRows.length < pageSize) {
+      return {
+        rows: rows,
+        actualFields: Object.keys(fieldSet),
+        pageCalls: pageCalls,
+        pageSize: pageSize,
+        stopReason: 'SHORT_PAGE'
+      };
+    }
+  }
+
+  throw new Error(
+    'STD Contacts reached maxPages=' + maxPages +
+    ' without a short final page. Refusing to replace DATA_CONTACTS.'
+  );
+}
+
+function hub_stdContactsPagedUrl_(reportUrl, pageIndex, pageSize) {
+  let url = String(reportUrl || '').trim();
+
+  url = url
+    .replace(/([?&])pageIndex=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/([?&])pageSize=\d+(&?)/ig, function(_, lead, tail) {
+      return tail ? lead : '';
+    })
+    .replace(/[?&]$/, '');
+
+  const separator = url.indexOf('?') >= 0 ? '&' : '?';
+
+  return url +
+    separator + 'pageIndex=' + encodeURIComponent(pageIndex) +
+    '&pageSize=' + encodeURIComponent(pageSize);
+}
+
+function hub_stdContactsExtractRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.rows, payload.Rows,
+    payload.records, payload.Records
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  const keys = Object.keys(payload);
+
+  for (let i = 0; i < keys.length; i++) {
+    const value = payload[keys[i]];
+
+    if (
+      Array.isArray(value) &&
+      value.length &&
+      typeof value[0] === 'object' &&
+      !Array.isArray(value[0])
+    ) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+function hub_auditStdContactsSchema_(actualFields, schema) {
+  const normToRaw = {};
+
+  actualFields.forEach(function(raw) {
+    const norm = hub_stdContactsNormalizeFieldName_(raw);
+    if (!normToRaw[norm]) normToRaw[norm] = [];
+    normToRaw[norm].push(raw);
+  });
+
+  const canonicalToSource = {};
+  const sourceToCanonical = {};
+  const missing = [];
+  const ambiguous = [];
+  const acceptedNorms = {};
+
+  schema.forEach(function(def) {
+    const canonicalNorm = hub_stdContactsNormalizeFieldName_(def.canonical);
+    const aliases = (def.aliases || []).slice();
+
+    // Mandatory alias standard: canonical name must itself be an accepted alias.
+    if (!aliases.some(function(alias) {
+      return hub_stdContactsNormalizeFieldName_(alias) === canonicalNorm;
+    })) {
+      throw new Error(
+        'STD Contacts alias contract invalid: canonical missing from alias set for ' +
+        def.canonical
+      );
+    }
+
+    const matches = [];
+
+    aliases.forEach(function(alias) {
+      const norm = hub_stdContactsNormalizeFieldName_(alias);
+      acceptedNorms[norm] = true;
+
+      (normToRaw[norm] || []).forEach(function(raw) {
+        if (matches.indexOf(raw) < 0) matches.push(raw);
+      });
+    });
+
+    if (matches.length === 0) {
+      missing.push(def.canonical);
+      return;
+    }
+
+    if (matches.length > 1) {
+      ambiguous.push({
+        canonical: def.canonical,
+        sourceFields: matches
+      });
+      return;
+    }
+
+    canonicalToSource[def.canonical] = matches[0];
+    sourceToCanonical[matches[0]] = def.canonical;
+  });
+
+  const unexpected = actualFields.filter(function(raw) {
+    return !acceptedNorms[hub_stdContactsNormalizeFieldName_(raw)];
+  });
+
+  return {
+    canonicalToSource: canonicalToSource,
+    sourceToCanonical: sourceToCanonical,
+    missingCanonicalFields: missing,
+    ambiguousCanonicalFields: ambiguous,
+    unexpectedSourceFields: unexpected
+  };
+}
+
+function hub_buildStdContactRecord_(source, canonicalToSource) {
+  function src(canonical) {
+    const key = canonicalToSource[canonical];
+    return key ? source[key] : '';
+  }
+
+  const customerId = hub_stdContactsClean_(src('CustomerId'));
+  const contactId = hub_stdContactsClean_(src('ContactId'));
+  const customerPhone = hub_stdContactsClean_(src('CustomerPrimaryPhone'));
+  const contactPhone = hub_stdContactsClean_(src('ContactPrimaryPhone'));
+  const contactEmail = hub_stdContactsClean_(src('ContactPrimaryEmail'));
+  const customerAddress = hub_stdContactsClean_(src('CustomerFullAddress'));
+  const contactAddress = hub_stdContactsClean_(src('ContactFullAddress'));
+  const contactPhoneParts = hub_stdContactsPhoneParts_(contactPhone);
+
+  return {
+    CustomerDateCreated: src('CustomerDateCreated'),
+    CustomerId: customerId,
+    CustomerNumber: customerId,
+    CustomerName: hub_stdContactsClean_(src('CustomerName')),
+    CustomerStatus: 'Active',
+    CustomerPrimaryPhone: customerPhone,
+    NormalizedCustomerPhone: hub_stdContactsPhoneParts_(customerPhone).number,
+    CustomerPrimaryEmail: contactEmail,
+    NormalizedCustomerEmail: hub_stdContactsNormalizeEmail_(contactEmail),
+    CustomerFullAddress: customerAddress,
+    CustomerCity: hub_stdContactsCityFromFullAddress_(customerAddress),
+    NormalizedCustomerAddress: hub_stdContactsNormalizeAddress_(customerAddress),
+
+    ContactId: contactId,
+    FirstName: hub_stdContactsClean_(src('FirstName')),
+    LastName: hub_stdContactsClean_(src('LastName')),
+    ContactFullName: hub_stdContactsClean_(src('ContactFullName')),
+    ContactPrimaryEmail: contactEmail,
+    NormalizedContactEmail: hub_stdContactsNormalizeEmail_(contactEmail),
+    ContactPrimaryPhone: contactPhone,
+    NormalizedContactPhone: contactPhoneParts.number,
+    ContactPhoneExtension: contactPhoneParts.extension,
+    ContactFullAddress: contactAddress,
+    ContactCity: hub_stdContactsCityFromFullAddress_(contactAddress),
+    NormalizedContactAddress: hub_stdContactsNormalizeAddress_(contactAddress),
+
+    EntityType: 'CONTACT',
+    EntityId: contactId,
+    CustomerContactKey: customerId && contactId ? customerId + '|' + contactId : ''
+  };
+}
+
+function hub_replaceStdContactsSheet_(sh, headers, values) {
+  const requiredRows = Math.max(2, values.length + 1);
+  const requiredCols = headers.length;
+
+  if (sh.getMaxRows() < requiredRows) {
+    sh.insertRowsAfter(sh.getMaxRows(), requiredRows - sh.getMaxRows());
+  }
+
+  if (sh.getMaxColumns() < requiredCols) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), requiredCols - sh.getMaxColumns());
+  }
+
+  const oldLastRow = sh.getLastRow();
+  const oldLastColumn = sh.getLastColumn();
+
+  sh.getRange(1, 1, 1, requiredCols).setValues([headers]);
+
+  const chunkSize = 4000;
+  for (let start = 0; start < values.length; start += chunkSize) {
+    const chunk = values.slice(start, start + chunkSize);
+    sh.getRange(start + 2, 1, chunk.length, requiredCols).setValues(chunk);
+  }
+
+  const newLastRow = values.length + 1;
+
+  if (oldLastRow > newLastRow) {
+    sh.getRange(
+      newLastRow + 1,
+      1,
+      oldLastRow - newLastRow,
+      Math.max(requiredCols, oldLastColumn)
+    ).clearContent();
+  }
+
+  if (oldLastColumn > requiredCols && newLastRow > 0) {
+    sh.getRange(
+      1,
+      requiredCols + 1,
+      newLastRow,
+      oldLastColumn - requiredCols
+    ).clearContent();
+  }
+
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, 1, requiredCols)
+    .setFontWeight('bold')
+    .setFontColor('#FFFFFF')
+    .setBackground('#1F4E78')
+    .setWrap(true);
+
+  SpreadsheetApp.flush();
+}
+
+function hub_stdContactsNormalizeFieldName_(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toLowerCase();
+}
+
+function hub_stdContactsClean_(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function hub_stdContactsNormalizeEmail_(value) {
+  return hub_stdContactsClean_(value).toLowerCase();
+}
+
+function hub_stdContactsPhoneParts_(value) {
+  const raw = hub_stdContactsClean_(value);
+  const extMatch = raw.match(/(?:ext(?:ension)?\.?|x)\s*[:.#-]?\s*(\d+)\s*$/i);
+  const extension = extMatch ? extMatch[1] : '';
+  let main = extMatch ? raw.substring(0, extMatch.index) : raw;
+  let digits = main.replace(/\D/g, '');
+
+  if (digits.length === 11 && digits.charAt(0) === '1') {
+    digits = digits.substring(1);
+  }
+
+  return {
+    number: digits.length === 10 ? digits : digits,
+    extension: extension
+  };
+}
+
+function hub_stdContactsNormalizeAddress_(value) {
+  return hub_stdContactsClean_(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hub_stdContactsCityFromFullAddress_(value) {
+  const raw = hub_stdContactsClean_(value);
+  if (!raw) return '';
+
+  const parts = raw.split(',').map(function(part) {
+    return part.trim();
+  }).filter(Boolean);
+
+  if (parts.length < 3) return '';
+
+  const last = parts[parts.length - 1];
+
+  // Only infer a city when the final component resembles a CA/US
+  // province/state/postal component. Otherwise leave blank rather than guess.
+  const regionLike =
+    /\b(?:ON|QC|BC|AB|MB|SK|NS|NB|NL|PE|NT|NU|YT)\b/i.test(last) ||
+    /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(last) ||
+    /\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/i.test(last);
+
+  return regionLike ? parts[parts.length - 2] : '';
+}
+
+function hub_stdContactsSafeText_(value, maxLen) {
+  let s = String(value == null ? '' : value);
+
+  s = s.replace(
+    /(authorization\s*[:=]\s*['"]?\s*(?:basic|bearer)\s+)[A-Za-z0-9._~+\/=-]+/ig,
+    '$1[REDACTED]'
+  );
+
+  s = s.replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, '[REDACTED_KEY]');
+
+  s = s.replace(
+    /([?&](?:api[_-]?key|key|token|access_token)=)[^&\s'"]+/ig,
+    '$1[REDACTED]'
+  );
+
+  return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+}
+
+/* === HUB_STD_CONTACTS_R1_4_END === */
+
+/* === HUB_STD_LOCATIONS_R1_6_BEGIN ===
+ * STD - Customer Locations - Central Hub
+ * Production full refresh.
+ *
+ * SAFETY:
+ * - READS Striven custom report only.
+ * - WRITES only this Hub's DATA_LOCATIONS plus Hub logs/control.
+ * - Does not modify registered source projects.
+ * - Does not POST/PATCH/PUT/DELETE to Striven.
+ *
+ * BUSINESS RULES CONFIRMED:
+ * - Customer Status = Active in the Striven report filter.
+ * - Location Active = Yes in the Striven report filter.
+ * - Address State = Ontario in the Striven report filter.
+ * - Location Full Address is set in the Striven report filter.
+ * - Customer ID = Customer Number in this tenant.
+ */
+
+function hub_refreshStdLocations() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('STD Locations refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const runId = 'STD_LOCATIONS_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let pageCalls = 0;
+  let rowsFetched = 0;
+
+  try {
+    hub_initializeOrRepair();
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || '').trim();
+    const reportUrl = String(props.getProperty('STRIVEN_STD_LOCATIONS_REPORT_URL') || '').trim();
+
+    const missingProperties = [];
+    if (!clientId) missingProperties.push('CLIENT_ID');
+    if (!clientSecret) missingProperties.push('CLIENT_SECRET');
+    if (!reportUrl) missingProperties.push('STRIVEN_STD_LOCATIONS_REPORT_URL');
+
+    if (missingProperties.length) {
+      throw new Error('Missing Script Properties: ' + missingProperties.join(', '));
+    }
+
+    if (!/^https:\/\/api\.striven\.com\//i.test(reportUrl)) {
+      throw new Error('STRIVEN_STD_LOCATIONS_REPORT_URL must use https://api.striven.com/.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    const fetched = hub_fetchStdLocationsAllPages_(
+      reportUrl,
+      tokenInfo.accessToken,
+      500
+    );
+
+    pageCalls = fetched.pageCalls;
+    rowsFetched = fetched.rows.length;
+
+    if (!fetched.rows.length) {
+      throw new Error(
+        'STD Locations report returned zero rows. DATA_LOCATIONS was not replaced.'
+      );
+    }
+
+    const schema = hub_stdLocationsSchema_();
+    const audit = hub_auditStdLocationsSchema_(fetched.actualFields, schema);
+
+    if (
+      audit.missingCanonicalFields.length ||
+      audit.ambiguousCanonicalFields.length ||
+      audit.unexpectedSourceFields.length ||
+      fetched.actualFields.length !== schema.length
+    ) {
+      throw new Error(
+        'STD Locations schema validation failed. ' +
+        JSON.stringify({
+          expectedCanonicalFieldCount: schema.length,
+          actualFieldCount: fetched.actualFields.length,
+          actualFields: fetched.actualFields,
+          missingCanonicalFields: audit.missingCanonicalFields,
+          ambiguousCanonicalFields: audit.ambiguousCanonicalFields,
+          unexpectedSourceFields: audit.unexpectedSourceFields
+        })
+      );
+    }
+
+    const preferredHeaders = hub_stdLocationsSourceHeaders_();
+    const nonPreferredDisplayNames = fetched.actualFields.filter(function(field) {
+      return preferredHeaders.indexOf(field) < 0;
+    });
+
+    if (nonPreferredDisplayNames.length) {
+      throw new Error(
+        'STD Locations report is not using standardized Display Names: ' +
+        nonPreferredDisplayNames.join(', ')
+      );
+    }
+
+    const seenLocationIds = {};
+    const seenCustomerLocationKeys = {};
+
+    let missingCustomerIds = 0;
+    let missingLocationIds = 0;
+    let missingLocationAddressIds = 0;
+    let duplicateLocationIds = 0;
+    let duplicateCustomerLocationKeys = 0;
+
+    const records = fetched.rows.map(function(source) {
+      const record = hub_buildStdLocationRecord_(
+        source,
+        audit.canonicalToSource
+      );
+
+      if (!record.CustomerId) missingCustomerIds++;
+      if (!record.LocationId) missingLocationIds++;
+      if (!record.LocationAddressId) missingLocationAddressIds++;
+
+      if (record.LocationId) {
+        if (seenLocationIds[record.LocationId]) duplicateLocationIds++;
+        else seenLocationIds[record.LocationId] = true;
+      }
+
+      if (record.CustomerLocationKey) {
+        if (seenCustomerLocationKeys[record.CustomerLocationKey]) {
+          duplicateCustomerLocationKeys++;
+        } else {
+          seenCustomerLocationKeys[record.CustomerLocationKey] = true;
+        }
+      }
+
+      return record;
+    });
+
+    if (
+      missingCustomerIds ||
+      missingLocationIds ||
+      missingLocationAddressIds
+    ) {
+      throw new Error(
+        'STD Locations contains required-ID gaps. ' +
+        JSON.stringify({
+          missingCustomerIds: missingCustomerIds,
+          missingLocationIds: missingLocationIds,
+          missingLocationAddressIds: missingLocationAddressIds
+        })
+      );
+    }
+
+    if (duplicateLocationIds || duplicateCustomerLocationKeys) {
+      throw new Error(
+        'STD Locations contains duplicate identity keys. ' +
+        JSON.stringify({
+          duplicateLocationIds: duplicateLocationIds,
+          duplicateCustomerLocationKeys: duplicateCustomerLocationKeys
+        })
+      );
+    }
+
+    const headers = hub_stdLocationsHeaders_();
+    const values = records.map(function(record) {
+      return headers.map(function(header) {
+        return record[header] == null ? '' : record[header];
+      });
+    });
+
+    const sh = SpreadsheetApp.getActive().getSheetByName('DATA_LOCATIONS');
+    if (!sh) throw new Error('DATA_LOCATIONS sheet is missing.');
+
+    // Full remote fetch + schema + identity validation has completed.
+    // Only now is the existing Hub dataset replaced.
+    hub_writeCanonicalDataset_(sh, headers, values);
+    SpreadsheetApp.flush();
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const apiCalls = pageCalls + (tokenInfo.requestedNewToken ? 1 : 0);
+
+    hub_updateRefreshControl_(
+      'LOCATIONS',
+      true,
+      records.length,
+      apiCalls,
+      durationSec,
+      'SUCCESS',
+      ''
+    );
+
+    hub_apiUsage_(
+      runId,
+      'LOCATIONS',
+      'STRIVEN_STD_LOCATIONS_REPORT_URL',
+      'GET',
+      apiCalls,
+      records.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshStdLocations'
+    );
+
+    const result = {
+      status: 'PASS',
+      dataset: 'LOCATIONS',
+      targetSheet: 'DATA_LOCATIONS',
+      rows: records.length,
+      sourceCanonicalFieldCount: schema.length,
+      outputColumnCount: headers.length,
+      reportPageCalls: pageCalls,
+      pageSize: fetched.pageSize,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      totalApiCallsThisRun: apiCalls,
+      sourceToCanonical: audit.sourceToCanonical,
+      canonicalToSource: audit.canonicalToSource,
+      duplicateLocationIds: duplicateLocationIds,
+      duplicateCustomerLocationKeys: duplicateCustomerLocationKeys,
+      missingCustomerIds: missingCustomerIds,
+      missingLocationIds: missingLocationIds,
+      missingLocationAddressIds: missingLocationAddressIds,
+      derivedFields: [
+        'CustomerNumber',
+        'CustomerStatus',
+        'LocationIsActive',
+        'LocationProvince',
+        'NormalizedLocationPhone',
+        'NormalizedLocationAddress',
+        'NormalizedLocationPostalCode',
+        'LocationKey',
+        'CustomerLocationKey'
+      ],
+      filterExpectation: [
+        'Customer Status = Active',
+        'Location Full Address is set',
+        'Address State = Ontario',
+        'Location Active = Yes'
+      ],
+      strivenWritesPerformed: false,
+      sourceProjectsModified: false,
+      durationSec: durationSec
+    };
+
+    hub_log_(
+      'INFO',
+      'STD_LOCATIONS_REFRESH',
+      'LOCATIONS',
+      'Standard Locations refresh completed.',
+      JSON.stringify(result)
+    );
+
+    Logger.log(JSON.stringify(result, null, 2));
+    return result;
+
+  } catch (err) {
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const safeError = hub_limit_(String(err && err.message || err), 1000);
+
+    try {
+      hub_updateRefreshControl_(
+        'LOCATIONS',
+        false,
+        rowsFetched,
+        pageCalls,
+        durationSec,
+        'FAILED',
+        safeError
+      );
+
+      hub_apiUsage_(
+        runId,
+        'LOCATIONS',
+        'STRIVEN_STD_LOCATIONS_REPORT_URL',
+        'GET',
+        pageCalls,
+        rowsFetched,
+        durationSec,
+        'FAILED',
+        safeError,
+        'hub_refreshStdLocations'
+      );
+
+      hub_log_(
+        'ERROR',
+        'STD_LOCATIONS_REFRESH',
+        'LOCATIONS',
+        'Standard Locations refresh failed; previous DATA_LOCATIONS retained.',
+        safeError
+      );
+    } catch (loggingErr) {
+      // Preserve original exception.
+    }
+
+    throw err;
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_stdLocationsSchema_() {
+  return [
+    {
+      canonical: 'LocationDateCreated',
+      aliases: [
+        'LocationDateCreated', 'Location Date Created',
+        'CreatedOn', 'Created On', 'DateCreated', 'Date Created'
+      ]
+    },
+    {
+      canonical: 'CustomerId',
+      aliases: [
+        'CustomerId', 'CustomerID', 'Customer Id', 'Customer ID',
+        'CustomerNumber', 'Customer Number'
+      ]
+    },
+    {
+      canonical: 'CustomerName',
+      aliases: [
+        'CustomerName', 'Customer Name'
+      ]
+    },
+    {
+      canonical: 'LocationId',
+      aliases: [
+        'LocationId', 'LocationID', 'Location Id', 'Location ID'
+      ]
+    },
+    {
+      canonical: 'LocationName',
+      aliases: [
+        'LocationName', 'Location Name', 'Name'
+      ]
+    },
+    {
+      canonical: 'LocationPrimaryPhone',
+      aliases: [
+        'LocationPrimaryPhone', 'Location Primary Phone',
+        'PrimaryPhone', 'Primary Phone'
+      ]
+    },
+    {
+      canonical: 'LocationFullAddress',
+      aliases: [
+        'LocationFullAddress', 'Location Full Address',
+        'AddressFullAddress', 'Address Full Address',
+        'FullAddress', 'Full Address'
+      ]
+    },
+    {
+      canonical: 'LocationPostalCode',
+      aliases: [
+        'LocationPostalCode', 'Location Postal Code',
+        'AddressZip', 'Address Zip', 'Zip',
+        'PostalCode', 'Postal Code'
+      ]
+    },
+    {
+      canonical: 'LocationAddressId',
+      aliases: [
+        'LocationAddressId', 'Location Address Id', 'Location Address ID',
+        'AddressId', 'AddressID', 'Address Id', 'Address ID'
+      ]
+    },
+    {
+      canonical: 'LocationIsPrimary',
+      aliases: [
+        'LocationIsPrimary', 'Location Is Primary',
+        'IsPrimaryLocation', 'Is Primary Location', 'Primary'
+      ]
+    },
+    {
+      canonical: 'LocationIsDefaultShipTo',
+      aliases: [
+        'LocationIsDefaultShipTo', 'Location Is Default Ship To',
+        'IsDefaultShipTo', 'Is Default Ship To',
+        'DefaultShipTo', 'Default Ship To'
+      ]
+    },
+    {
+      canonical: 'LocationIsDefaultBillTo',
+      aliases: [
+        'LocationIsDefaultBillTo', 'Location Is Default Bill To',
+        'IsDefaultBillTo', 'Is Default Bill To',
+        'DefaultBillTo', 'Default Bill To'
+      ]
+    },
+    {
+      canonical: 'LocationDateLastModified',
+      aliases: [
+        'LocationDateLastModified', 'Location Date Last Modified',
+        'DateLastModified', 'Date Last Modified',
+        'LastModified', 'Last Modified'
+      ]
+    }
+  ];
+}
+
+function hub_stdLocationsSourceHeaders_() {
+  return [
+    'LocationDateCreated',
+    'CustomerId',
+    'CustomerName',
+    'LocationId',
+    'LocationName',
+    'LocationPrimaryPhone',
+    'LocationFullAddress',
+    'LocationPostalCode',
+    'LocationAddressId',
+    'LocationIsPrimary',
+    'LocationIsDefaultShipTo',
+    'LocationIsDefaultBillTo',
+    'LocationDateLastModified'
+  ];
+}
+
+function hub_stdLocationsHeaders_() {
+  return [
+    'LocationDateCreated',
+    'LocationDateLastModified',
+
+    'CustomerId',
+    'CustomerNumber',
+    'CustomerName',
+    'CustomerStatus',
+
+    'LocationId',
+    'LocationKey',
+    'CustomerLocationKey',
+    'LocationName',
+
+    'LocationAddressId',
+    'LocationFullAddress',
+    'LocationProvince',
+    'LocationPostalCode',
+    'NormalizedLocationPostalCode',
+    'NormalizedLocationAddress',
+
+    'LocationPrimaryPhone',
+    'NormalizedLocationPhone',
+
+    'LocationIsPrimary',
+    'LocationIsDefaultShipTo',
+    'LocationIsDefaultBillTo',
+    'LocationIsActive'
+  ];
+}
+
+function hub_fetchStdLocationsAllPages_(reportUrl, accessToken, pageSize) {
+  const rows = [];
+  const fieldSet = {};
+  const maxPages = 500;
+  let pageCalls = 0;
+
+  for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
+    const pageUrl = hub_reportPagedUrl_(reportUrl, pageIndex, pageSize);
+
+    const response = UrlFetchApp.fetch(pageUrl, {
+      method: 'get',
+      headers: {
+        Authorization: 'Bearer ' + accessToken,
+        Accept: 'application/json'
+      },
+      muteHttpExceptions: true
+    });
+
+    pageCalls++;
+
+    const code = response.getResponseCode();
+    const text = response.getContentText();
+
+    if (code === 401) {
+      PropertiesService.getScriptProperties()
+        .deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+      PropertiesService.getScriptProperties()
+        .deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+    }
+
+    if (code < 200 || code >= 300) {
+      throw new Error(
+        'STD Locations report page ' + pageIndex +
+        ' failed HTTP ' + code + ': ' +
+        hub_safeExternalText_(text, 500)
+      );
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (e) {
+      throw new Error(
+        'STD Locations page ' + pageIndex + ' returned non-JSON content.'
+      );
+    }
+
+    const pageRows = hub_stdLocationsExtractRows_(payload);
+
+    pageRows.forEach(function(row) {
+      Object.keys(row || {}).forEach(function(key) {
+        fieldSet[key] = true;
+      });
+      rows.push(row);
+    });
+
+    if (pageRows.length < pageSize) {
+      return {
+        rows: rows,
+        actualFields: Object.keys(fieldSet),
+        pageCalls: pageCalls,
+        pageSize: pageSize,
+        stopReason: 'SHORT_PAGE'
+      };
+    }
+  }
+
+  throw new Error(
+    'STD Locations reached maxPages=' + maxPages +
+    ' without a short final page. Refusing to replace DATA_LOCATIONS.'
+  );
+}
+
+function hub_stdLocationsExtractRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.rows, payload.Rows,
+    payload.records, payload.Records
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  const keys = Object.keys(payload);
+
+  for (let i = 0; i < keys.length; i++) {
+    const value = payload[keys[i]];
+
+    if (
+      Array.isArray(value) &&
+      value.length &&
+      typeof value[0] === 'object' &&
+      !Array.isArray(value[0])
+    ) {
+      return value;
+    }
+  }
+
+  return [];
+}
+
+function hub_auditStdLocationsSchema_(actualFields, schema) {
+  const normToRaw = {};
+
+  actualFields.forEach(function(raw) {
+    const norm = hub_stdLocationsNormalizeFieldName_(raw);
+    if (!normToRaw[norm]) normToRaw[norm] = [];
+    normToRaw[norm].push(raw);
+  });
+
+  const canonicalToSource = {};
+  const sourceToCanonical = {};
+  const missing = [];
+  const ambiguous = [];
+  const acceptedNorms = {};
+
+  schema.forEach(function(def) {
+    const canonicalNorm = hub_stdLocationsNormalizeFieldName_(def.canonical);
+    const aliases = (def.aliases || []).slice();
+
+    // Mandatory Central Hub alias standard.
+    if (!aliases.some(function(alias) {
+      return hub_stdLocationsNormalizeFieldName_(alias) === canonicalNorm;
+    })) {
+      throw new Error(
+        'STD Locations alias contract invalid: canonical missing from alias set for ' +
+        def.canonical
+      );
+    }
+
+    const matches = [];
+
+    aliases.forEach(function(alias) {
+      const norm = hub_stdLocationsNormalizeFieldName_(alias);
+      acceptedNorms[norm] = true;
+
+      (normToRaw[norm] || []).forEach(function(raw) {
+        if (matches.indexOf(raw) < 0) matches.push(raw);
+      });
+    });
+
+    if (matches.length === 0) {
+      missing.push(def.canonical);
+      return;
+    }
+
+    if (matches.length > 1) {
+      ambiguous.push({
+        canonical: def.canonical,
+        sourceFields: matches
+      });
+      return;
+    }
+
+    canonicalToSource[def.canonical] = matches[0];
+    sourceToCanonical[matches[0]] = def.canonical;
+  });
+
+  const unexpected = actualFields.filter(function(raw) {
+    return !acceptedNorms[hub_stdLocationsNormalizeFieldName_(raw)];
+  });
+
+  return {
+    canonicalToSource: canonicalToSource,
+    sourceToCanonical: sourceToCanonical,
+    missingCanonicalFields: missing,
+    ambiguousCanonicalFields: ambiguous,
+    unexpectedSourceFields: unexpected
+  };
+}
+
+function hub_buildStdLocationRecord_(source, canonicalToSource) {
+  function src(canonical) {
+    const key = canonicalToSource[canonical];
+    return key ? source[key] : '';
+  }
+
+  const customerId = hub_stdLocationsClean_(src('CustomerId'));
+  const locationId = hub_stdLocationsClean_(src('LocationId'));
+  const addressId = hub_stdLocationsClean_(src('LocationAddressId'));
+  const phone = hub_stdLocationsClean_(src('LocationPrimaryPhone'));
+  const fullAddress = hub_stdLocationsClean_(src('LocationFullAddress'));
+  const postal = hub_stdLocationsClean_(src('LocationPostalCode'));
+
+  return {
+    LocationDateCreated: src('LocationDateCreated'),
+    LocationDateLastModified: src('LocationDateLastModified'),
+
+    CustomerId: customerId,
+    CustomerNumber: customerId,
+    CustomerName: hub_stdLocationsClean_(src('CustomerName')),
+    CustomerStatus: 'Active',
+
+    LocationId: locationId,
+    LocationKey: locationId,
+    CustomerLocationKey:
+      customerId && locationId ? customerId + '|' + locationId : '',
+    LocationName: hub_stdLocationsClean_(src('LocationName')),
+
+    LocationAddressId: addressId,
+    LocationFullAddress: fullAddress,
+    LocationProvince: 'Ontario',
+    LocationPostalCode: postal,
+    NormalizedLocationPostalCode: hub_stdLocationsNormalizePostal_(postal),
+    NormalizedLocationAddress: hub_stdLocationsNormalizeAddress_(fullAddress),
+
+    LocationPrimaryPhone: phone,
+    NormalizedLocationPhone: hub_stdLocationsNormalizePhone_(phone),
+
+    LocationIsPrimary: hub_stdLocationsBoolean_(src('LocationIsPrimary')),
+    LocationIsDefaultShipTo:
+      hub_stdLocationsBoolean_(src('LocationIsDefaultShipTo')),
+    LocationIsDefaultBillTo:
+      hub_stdLocationsBoolean_(src('LocationIsDefaultBillTo')),
+    LocationIsActive: true
+  };
+}
+
+function hub_stdLocationsNormalizeFieldName_(value) {
+  return String(value == null ? '' : value)
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toLowerCase();
+}
+
+function hub_stdLocationsClean_(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function hub_stdLocationsNormalizePhone_(value) {
+  const raw = hub_stdLocationsClean_(value);
+  let digits = raw.replace(/\D/g, '');
+
+  if (digits.length === 11 && digits.charAt(0) === '1') {
+    digits = digits.substring(1);
+  }
+
+  return digits;
+}
+
+function hub_stdLocationsNormalizePostal_(value) {
+  return hub_stdLocationsClean_(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function hub_stdLocationsNormalizeAddress_(value) {
+  return hub_stdLocationsClean_(value)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hub_stdLocationsBoolean_(value) {
+  if (value === true || value === false) return value;
+
+  const s = hub_stdLocationsClean_(value).toLowerCase();
+
+  if (['true', 'yes', 'y', '1'].indexOf(s) >= 0) return true;
+  if (['false', 'no', 'n', '0', ''].indexOf(s) >= 0) return false;
+
+  throw new Error('Unrecognized Location boolean value: ' + String(value));
+}
+
+/* === HUB_STD_LOCATIONS_R1_6_END === */
+
+
+/* === HUB_PO_SALES_SCOPE_R1_BEGIN ===
+ * PO Sales Scope — manual refresh only.
+ *
+ * SAFETY:
+ * - READS only GET /v1/purchase-orders/{id} from Striven.
+ * - WRITES only the PO_SALES_SCOPE sheet plus Hub logs/API usage.
+ * - Performs no Striven POST/PUT/PATCH/DELETE operations.
+ * - Uses stable Striven Item ID as the primary item key.
+ */
+function hub_refreshPoSalesScope() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('PO Sales Scope refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const runId = 'PO_SALES_SCOPE_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  const poRecordIds = [4168, 4173, 4174];
+  const expectedPoNumbers = ['2739', '2744', '2745'];
+  let apiCalls = 0;
+
+  try {
+    hub_initializeOrRepair();
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(
+      props.getProperty('CLIENT_ID') ||
+      props.getProperty('STRIVEN_CLIENT_ID') ||
+      ''
+    ).trim();
+    const clientSecret = String(
+      props.getProperty('CLIENT_SECRET') ||
+      props.getProperty('STRIVEN_CLIENT_SECRET') ||
+      ''
+    ).trim();
+
+    if (!clientId || !clientSecret) {
+      throw new Error(
+        'Missing CLIENT_ID/CLIENT_SECRET or STRIVEN_CLIENT_ID/STRIVEN_CLIENT_SECRET.'
+      );
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    if (tokenInfo.requestedNewToken) apiCalls++;
+
+    const itemNumberById = hub_poSalesScopeItemNumberMap_();
+    const rows = [];
+    const placeholderRows = [['PO Number','PO Line ID','Item ID','Qty ordered','Source description','Inventory location','Snapshot UTC']];
+    const returnedPoNumbers = [];
+
+    poRecordIds.forEach(function(poRecordId) {
+      const po = hub_fetchPurchaseOrder_(poRecordId, tokenInfo.accessToken);
+      apiCalls++;
+
+      if (!po || Number(po.id) !== Number(poRecordId)) {
+        throw new Error(
+          'Purchase Order response ID mismatch for requested record ' + poRecordId + '.'
+        );
+      }
+
+      const returnedPoNumber = String(po.poNumber || '').trim();
+      if (!returnedPoNumber) {
+        throw new Error(
+          'Purchase Order record ' + poRecordId + ' returned a blank PO Number.'
+        );
+      }
+      returnedPoNumbers.push(returnedPoNumber);
+
+      const lineItems = Array.isArray(po.lineItems) ? po.lineItems : [];
+      if (!lineItems.length) {
+        throw new Error(
+          'Purchase Order record ' + poRecordId + ' returned zero line items.'
+        );
+      }
+
+      lineItems.forEach(function(line) {
+        const item = line && line.item ? line.item : {};
+        const itemId = item && item.id != null ? String(item.id) : '';
+        if (!itemId) {
+          throw new Error(
+            'PO record ' + poRecordId + ' contains a line without Striven Item ID.'
+          );
+        }
+
+        if(Number(itemId)===36935)placeholderRows.push([String(po.poNumber),Number(line.id),Number(itemId),Number(line.qty||0),String(line.description||''),line.inventoryLocation?String(line.inventoryLocation.name||''):'',new Date().toISOString()]);
+
+        rows.push([
+          Number(po.id),
+          String(po.poNumber || ''),
+          po.poDate || '',
+          po.status && po.status.name ? String(po.status.name) : '',
+          po.vendor && po.vendor.name ? String(po.vendor.name) : '',
+          line.id != null ? Number(line.id) : '',
+          Number(itemId),
+          itemNumberById[itemId] || hub_poSalesScopeItemNumberFromName_(item.name),
+          item && item.name ? String(item.name) : '',
+          Number(line.qty || 0),
+          Number(line.billedQty || 0),
+          Number(line.unitCost || 0),
+          line.inventoryLocation && line.inventoryLocation.name
+            ? String(line.inventoryLocation.name)
+            : '',
+          line.customer && line.customer.name ? String(line.customer.name) : '',
+          line.order && line.order.name ? String(line.order.name) : ''
+        ]);
+      });
+    });
+
+    const actualPoNumbers = returnedPoNumbers.slice().sort();
+    const expectedSorted = expectedPoNumbers.slice().sort();
+
+    if (
+      actualPoNumbers.length !== expectedSorted.length ||
+      actualPoNumbers.some(function(v, i) { return v !== expectedSorted[i]; })
+    ) {
+      throw new Error(
+        'PO scope mismatch. Records ' + poRecordIds.join(', ') +
+        ' returned [' + actualPoNumbers.join(', ') +
+        '], expected exactly [' + expectedSorted.join(', ') + '].'
+      );
+    }
+
+    if (!rows.length) {
+      throw new Error('PO Sales Scope produced zero rows; existing sheet was not replaced.');
+    }
+
+    const headers = [
+      'PO Record ID',
+      'PO Number',
+      'PO Date',
+      'PO Status',
+      'Vendor',
+      'Line ID',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Qty Ordered',
+      'Billed Qty',
+      'Unit Cost',
+      'Inventory Location',
+      'Customer',
+      'Sales Order'
+    ];
+
+    const ss = SpreadsheetApp.getActive();
+    let sh = ss.getSheetByName('PO_SALES_SCOPE');
+    if (!sh) sh = ss.insertSheet('PO_SALES_SCOPE');
+
+    sh.clearContents();
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    sh.setFrozenRows(1);
+    sh.autoResizeColumns(1, headers.length);
+
+    hub_rebuildPoItemScope_();
+    hub_poTable_(ss,'PO_PLACEHOLDER_SOURCE',placeholderRows);
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_apiUsage_(
+      runId,
+      'PO_SALES_SCOPE',
+      '/v1/purchase-orders/{id}',
+      'GET',
+      apiCalls,
+      rows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshPoSalesScope'
+    );
+
+    hub_log_(
+      'INFO',
+      'PO_SALES_SCOPE',
+      '2744,2739,2745',
+      'PO Sales Scope refreshed.',
+      JSON.stringify({
+        poRecordIds: poRecordIds,
+        expectedPoNumbers: expectedPoNumbers,
+        returnedPoNumbers: returnedPoNumbers,
+        rows: rows.length,
+        apiCalls: apiCalls,
+        tokenRequestMade: tokenInfo.requestedNewToken,
+        durationSec: durationSec,
+        strivenWritesPerformed: false
+      })
+    );
+
+    ss.toast(
+      'PO Sales Scope ready: ' + rows.length + ' item lines.',
+      'Central Hub',
+      8
+    );
+
+    return {
+      status: 'PASS',
+      poRecordIds: poRecordIds,
+      expectedPoNumbers: expectedPoNumbers,
+      returnedPoNumbers: returnedPoNumbers,
+      rows: rows.length,
+      apiCalls: apiCalls,
+      tokenRequestMade: tokenInfo.requestedNewToken,
+      targetSheet: 'PO_SALES_SCOPE',
+      strivenWritesPerformed: false
+    };
+  } catch (err) {
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+    const safeError = hub_safeExternalText_(
+      String(err && err.message || err),
+      1000
+    );
+
+    try {
+      hub_apiUsage_(
+        runId,
+        'PO_SALES_SCOPE',
+        '/v1/purchase-orders/{id}',
+        'GET',
+        apiCalls,
+        0,
+        durationSec,
+        'FAILED',
+        safeError,
+        'hub_refreshPoSalesScope'
+      );
+      hub_log_(
+        'ERROR',
+        'PO_SALES_SCOPE',
+        '2744,2739,2745',
+        'PO Sales Scope refresh failed; existing sheet retained when possible.',
+        safeError
+      );
+    } catch (loggingErr) {}
+
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_fetchPurchaseOrder_(poRecordId, token) {
+  const url =
+    'https://api.striven.com/v1/purchase-orders/' +
+    encodeURIComponent(String(poRecordId));
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Purchase Order ' + poRecordId + ' fetch failed HTTP ' + code + ': ' +
+      hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(
+      'Purchase Order ' + poRecordId + ' returned non-JSON content.'
+    );
+  }
+}
+
+function hub_poSalesScopeItemNumberMap_() {
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName('DATA_ITEMS');
+  if (!sh || sh.getLastRow() < 2) return {};
+
+  const values = sh.getDataRange().getValues();
+  const headers = values[0].map(function(v) { return String(v).trim(); });
+  const idCol = headers.indexOf('Id');
+  const numberCol = headers.indexOf('ItemNumber');
+
+  if (idCol < 0 || numberCol < 0) return {};
+
+  const map = {};
+  for (let i = 1; i < values.length; i++) {
+    const id = String(values[i][idCol] == null ? '' : values[i][idCol]).trim();
+    const number = String(
+      values[i][numberCol] == null ? '' : values[i][numberCol]
+    ).trim();
+    if (id && number && !map[id]) map[id] = number;
+  }
+  return map;
+}
+
+function hub_poSalesScopeItemNumberFromName_(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return '';
+  const m = s.match(/^([^\s]+)\s+-\s+/);
+  return m ? m[1] : '';
+}
+
+
+function hub_rebuildPoItemScope_() {
+  const ss = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('PO_SALES_SCOPE');
+  if (!src || src.getLastRow() < 2) {
+    throw new Error('PO_SALES_SCOPE is missing or empty.');
+  }
+
+  const values = src.getDataRange().getValues();
+  const headers = values[0].map(function(v) { return String(v).trim(); });
+
+  const poCol = headers.indexOf('PO Number');
+  const itemIdCol = headers.indexOf('Item ID');
+  const itemNumberCol = headers.indexOf('Item Number');
+  const itemNameCol = headers.indexOf('Item Name');
+  const qtyCol = headers.indexOf('Qty Ordered');
+
+  if ([poCol, itemIdCol, itemNumberCol, itemNameCol, qtyCol].some(function(i) { return i < 0; })) {
+    throw new Error('PO_SALES_SCOPE schema is missing required columns.');
+  }
+
+  const byItem = {};
+  values.slice(1).forEach(function(row) {
+    const itemId = String(row[itemIdCol] == null ? '' : row[itemIdCol]).trim();
+    if (!itemId) return;
+
+    const poNumber = String(row[poCol] == null ? '' : row[poCol]).trim();
+    const qty = Number(row[qtyCol] || 0);
+
+    if (!byItem[itemId]) {
+      byItem[itemId] = {
+        itemId: Number(itemId),
+        itemNumber: String(row[itemNumberCol] == null ? '' : row[itemNumberCol]).trim(),
+        itemName: String(row[itemNameCol] == null ? '' : row[itemNameCol]).trim(),
+        q2739: 0,
+        q2744: 0,
+        q2745: 0,
+        poMap: {},
+        sourceLines: 0,
+        exception: ''
+      };
+    }
+
+    const x = byItem[itemId];
+    if (poNumber === '2739') x.q2739 += qty;
+    if (poNumber === '2744') x.q2744 += qty;
+    if (poNumber === '2745') x.q2745 += qty;
+    x.poMap[poNumber] = true;
+    x.sourceLines++;
+
+    if (String(x.itemNumber).toUpperCase() === 'ENTERNEWPART') {
+      x.exception = 'REVIEW — ENTERNEWPART placeholder';
+    }
+  });
+
+  const rows = Object.keys(byItem)
+    .map(function(k) { return byItem[k]; })
+    .sort(function(a, b) {
+      return String(a.itemNumber).localeCompare(String(b.itemNumber), undefined, { numeric: true });
+    })
+    .map(function(x) {
+      return [
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.q2739,
+        x.q2744,
+        x.q2745,
+        x.q2739 + x.q2744 + x.q2745,
+        Object.keys(x.poMap).length,
+        x.sourceLines,
+        x.exception
+      ];
+    });
+
+  const outHeaders = [
+    'Item ID',
+    'Item Number',
+    'Item Name',
+    'PO 2739 Qty',
+    'PO 2744 Qty',
+    'PO 2745 Qty',
+    'Total Qty Ordered',
+    'PO Count',
+    'Source Line Count',
+    'Exception'
+  ];
+
+  let sh = ss.getSheetByName('PO_ITEM_SCOPE');
+  if (!sh) sh = ss.insertSheet('PO_ITEM_SCOPE');
+
+  sh.clearContents();
+  sh.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders]);
+  if (rows.length) sh.getRange(2, 1, rows.length, outHeaders.length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, outHeaders.length);
+
+  return {
+    status: 'PASS',
+    uniqueItems: rows.length,
+    exceptions: rows.filter(function(r) { return String(r[9] || '') !== ''; }).length,
+    strivenApiCalls: 0
+  };
+}
+
+/* === HUB_PO_SALES_SCOPE_R1_END === */
+
+/* === HUB_PO_INVENTORY_SCOPE_R1_BEGIN === */
+function hub_refreshPoInventoryScope() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    throw new Error('PO Inventory Scope refresh is already running.');
+  }
+
+  const startedMs = Date.now();
+  const asOfDate = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyy-MM-dd'
+  );
+  const runId = 'PO_INVENTORY_SCOPE_' + Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'America/Toronto',
+    'yyyyMMdd_HHmmss'
+  );
+
+  let apiCalls = 0;
+  const snapshotUtc = new Date().toISOString();
+
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) {
+      throw new Error('PO_ITEM_SCOPE is missing or empty. Refresh PO Sales Scope first.');
+    }
+
+    const values = scope.getDataRange().getValues();
+    const headers = values[0].map(function(v) { return String(v).trim(); });
+    const idCol = headers.indexOf('Item ID');
+    const numberCol = headers.indexOf('Item Number');
+    const nameCol = headers.indexOf('Item Name');
+
+    if (idCol < 0 || numberCol < 0 || nameCol < 0) {
+      throw new Error('PO_ITEM_SCOPE schema is missing Item ID / Item Number / Item Name.');
+    }
+
+    const items = values.slice(1)
+      .filter(function(r) { return r[idCol] !== '' && r[idCol] != null; })
+      .map(function(r) {
+        return {
+          itemId: Number(r[idCol]),
+          itemNumber: String(r[numberCol] == null ? '' : r[numberCol]).trim(),
+          itemName: String(r[nameCol] == null ? '' : r[nameCol]).trim()
+        };
+      });
+
+    if (!items.length) throw new Error('PO_ITEM_SCOPE contains zero Item IDs.');
+    const itemIds = {};
+    items.forEach(function(x) {
+      if (!Number.isInteger(x.itemId) || x.itemId <= 0 || itemIds[x.itemId]) throw new Error('Invalid or duplicate scoped Item ID: '+x.itemId);
+      itemIds[x.itemId] = true;
+    });
+
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(
+      props.getProperty('CLIENT_ID') ||
+      props.getProperty('STRIVEN_CLIENT_ID') ||
+      ''
+    ).trim();
+    const clientSecret = String(
+      props.getProperty('CLIENT_SECRET') ||
+      props.getProperty('STRIVEN_CLIENT_SECRET') ||
+      ''
+    ).trim();
+
+    if (!clientId || !clientSecret) {
+      throw new Error('Missing Striven API credentials.');
+    }
+
+    const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+    if (tokenInfo.requestedNewToken) apiCalls++;
+
+    const detailRows = [];
+    const summaryByItem = {};
+    const exceptions = [];
+
+    items.forEach(function(item) {
+      const result = hub_fetchItemInventoryLocations_(
+        item.itemId,
+        asOfDate,
+        tokenInfo.accessToken
+      );
+      apiCalls++;
+
+      const locations = hub_extractInventoryLocationRows_(result);
+
+      if (!locations.length) {
+        summaryByItem[item.itemId] = {
+          itemId: item.itemId,
+          itemNumber: item.itemNumber,
+          itemName: item.itemName,
+          qtyOnHand: '',
+          qtyOnSO: '',
+          qtyOnPO: '',
+          qtyOnBuild: '',
+          qtyAvailable: '',
+          qtyPendingBuild: '',
+          locationCount: 0,
+          exception: 'NO INVENTORY LOCATION ROWS RETURNED'
+        };
+        exceptions.push(item.itemId);
+        return;
+      }
+
+      const sum = {
+        itemId: item.itemId,
+        itemNumber: item.itemNumber,
+        itemName: item.itemName,
+        qtyOnHand: 0,
+        qtyOnSO: 0,
+        qtyOnPO: 0,
+        qtyOnBuild: 0,
+        qtyAvailable: 0,
+        qtyPendingBuild: 0,
+        locationCount: 0,
+        exception: ''
+      };
+
+      const seenLocations = {};
+      locations.forEach(function(loc) {
+        const locationId = hub_requiredInventoryNumber_(loc, 'inventoryLocationID');
+        if (!Number.isInteger(locationId) || locationId <= 0 || seenLocations[locationId]) {
+          throw new Error('Invalid or duplicate inventory location for Item ID '+item.itemId);
+        }
+        seenLocations[locationId] = true;
+        const locationName = hub_inventoryLocationName_(loc);
+        if (!locationName) throw new Error('Inventory location name missing for Item ID '+item.itemId);
+        const qtyOnHand = hub_requiredInventoryNumber_(loc, 'qtyOnHand');
+        const qtyOnSO = hub_requiredInventoryNumber_(loc, 'qtyOnSalesOrders');
+        const qtyOnPO = hub_requiredInventoryNumber_(loc, 'qtyOnPurchaseOrders');
+        const qtyOnBuild = hub_requiredInventoryNumber_(loc, 'qtyOnIncompleteBuilds');
+        const qtyAvailable = hub_requiredInventoryNumber_(loc, 'qtyAvailable');
+        const qtyPendingBuild = hub_requiredInventoryNumber_(loc, 'qtyOnPendingBuilds');
+
+        detailRows.push([
+          asOfDate,
+          item.itemId,
+          item.itemNumber,
+          item.itemName,
+          locationId,
+          locationName,
+          qtyOnHand,
+          qtyOnSO,
+          qtyOnPO,
+          qtyOnBuild,
+          qtyOnHand - qtyOnSO,
+          qtyAvailable,
+          qtyPendingBuild,
+          snapshotUtc
+        ]);
+
+        sum.qtyOnHand += qtyOnHand;
+        sum.qtyOnSO += qtyOnSO;
+        sum.qtyOnPO += qtyOnPO;
+        sum.qtyOnBuild += qtyOnBuild;
+        sum.qtyAvailable += qtyAvailable;
+        sum.qtyPendingBuild += qtyPendingBuild;
+        sum.locationCount++;
+      });
+
+      summaryByItem[item.itemId] = sum;
+    });
+
+    const detailHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Location ID',
+      'Location',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Incomplete Builds',
+      'Available Calc (On Hand - On SO)',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
+    ];
+
+    const summaryHeaders = [
+      'As Of Date',
+      'Item ID',
+      'Item Number',
+      'Item Name',
+      'Qty On Hand',
+      'Qty On SO',
+      'Qty On PO',
+      'Qty On Incomplete Builds',
+      'Available Calc (On Hand - On SO)',
+      'Inventory Location Count',
+      'Exception',
+      'Qty Available (Striven)',
+      'Qty On Pending Builds',
+      'Snapshot UTC'
+    ];
+
+    const summaryRows = items.map(function(item) {
+      const x = summaryByItem[item.itemId];
+      if (!x) throw new Error('Missing inventory summary for Item ID '+item.itemId);
+      return [
+        asOfDate,
+        x.itemId,
+        x.itemNumber,
+        x.itemName,
+        x.qtyOnHand,
+        x.qtyOnSO,
+        x.qtyOnPO,
+        x.qtyOnBuild,
+        x.locationCount ? x.qtyOnHand - x.qtyOnSO : '',
+        x.locationCount,
+        x.exception,
+        x.qtyAvailable,
+        x.qtyPendingBuild,
+        snapshotUtc
+      ];
+    });
+
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SCOPE', detailHeaders, detailRows);
+    hub_writeTableSheet_(ss, 'PO_INVENTORY_SUMMARY', summaryHeaders, summaryRows);
+
+    const durationSec = Math.round((Date.now() - startedMs) / 100) / 10;
+
+    hub_apiUsage_(
+      runId,
+      'PO_INVENTORY_SCOPE',
+      '/v1/items/{itemId}/inventory-locations?asofDate=' + asOfDate,
+      'GET',
+      apiCalls,
+      detailRows.length,
+      durationSec,
+      'SUCCESS',
+      '',
+      'hub_refreshPoInventoryScope'
+    );
+
+    hub_log_(
+      'INFO',
+      'PO_INVENTORY_SCOPE',
+      String(items.length),
+      'Scoped inventory refreshed for PO item universe.',
+      JSON.stringify({
+        asOfDate: asOfDate,
+        scopedItems: items.length,
+        detailRows: detailRows.length,
+        summaryRows: summaryRows.length,
+        exceptions: exceptions.length,
+        apiCalls: apiCalls,
+        tokenRequestMade: tokenInfo.requestedNewToken,
+        strivenWritesPerformed: false
+      })
+    );
+
+    ss.toast(
+      'PO inventory ready: ' + items.length + ' items, ' +
+      detailRows.length + ' location rows.',
+      'Central Hub',
+      8
+    );
+
+    return {
+      status: 'PASS',
+      asOfDate: asOfDate,
+      scopedItems: items.length,
+      detailRows: detailRows.length,
+      summaryRows: summaryRows.length,
+      exceptions: exceptions,
+      apiCalls: apiCalls,
+      strivenWritesPerformed: false
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function hub_fetchItemInventoryLocations_(itemId, asOfDate, token) {
+  const url =
+    'https://api.striven.com/v1/items/' +
+    encodeURIComponent(String(itemId)) +
+    '/inventory-locations?asofDate=' +
+    encodeURIComponent(String(asOfDate));
+
+  const response = hub_poReadFetch_(url, {
+    method: 'get',
+    headers: {
+      Authorization: 'Bearer ' + token,
+      Accept: 'application/json'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = response.getResponseCode();
+  const text = response.getContentText();
+
+  if (code === 401) {
+    const props = PropertiesService.getScriptProperties();
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+    props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+  }
+
+  if (code < 200 || code >= 300) {
+    throw new Error(
+      'Inventory locations fetch failed for Item ID ' + itemId +
+      ' HTTP ' + code + ': ' + hub_safeExternalText_(text, 500)
+    );
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(
+      'Inventory locations returned non-JSON for Item ID ' + itemId + '.'
+    );
+  }
+}
+
+function hub_extractInventoryLocationRows_(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') throw new Error('Unrecognized inventory response; existing tables retained.');
+
+  const candidates = [
+    payload.data, payload.Data,
+    payload.results, payload.Results,
+    payload.items, payload.Items,
+    payload.locations, payload.Locations,
+    payload.inventoryLocations, payload.InventoryLocations
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (Array.isArray(candidates[i])) return candidates[i];
+  }
+
+  throw new Error('Inventory response missing a recognized array; existing tables retained.');
+}
+
+function hub_pickInventoryField_(obj, keys, fallback) {
+  if (!obj || typeof obj !== 'object') return fallback;
+  for (let i = 0; i < keys.length; i++) {
+    if (Object.prototype.hasOwnProperty.call(obj, keys[i])) {
+      const v = obj[keys[i]];
+      if (v !== null && v !== undefined && v !== '') return v;
+    }
+  }
+  return fallback;
+}
+
+function hub_inventoryLocationName_(loc) {
+  const direct = hub_pickInventoryField_(loc, [
+    'locationName','LocationName','inventoryLocationName','InventoryLocationName','name','Name'
+  ], '');
+  if (direct) return String(direct);
+
+  const nested = loc && (
+    loc.location || loc.Location ||
+    loc.inventoryLocation || loc.InventoryLocation
+  );
+  if (nested && typeof nested === 'object') {
+    return String(
+      nested.name || nested.Name || nested.locationName || nested.LocationName || ''
+    );
+  }
+  return '';
+}
+
+function hub_numberOrZero_(value) {
+  const n = Number(value);
+  return isFinite(n) ? n : 0;
+}
+
+function hub_writeTableSheet_(ss, sheetName, headers, rows) {
+  let sh = ss.getSheetByName(sheetName);
+  if (!sh) sh = ss.insertSheet(sheetName);
+  sh.clearContents();
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (rows.length) {
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, headers.length);
+}
+
+/** Exact response fields verified in PO_DATA_CONTRACT_PROBE on 2026-10-07. */
+function hub_requiredInventoryNumber_(obj, key) {
+  if (!obj || !Object.prototype.hasOwnProperty.call(obj,key) ||
+      obj[key] === null || obj[key] === undefined ||
+      typeof obj[key] === 'boolean' || String(obj[key]).trim() === '' ||
+      (typeof obj[key] !== 'number' && typeof obj[key] !== 'string')) {
+    throw new Error('Missing or invalid inventory field: '+key+'; existing inventory tables retained.');
+  }
+  const n = Number(obj[key]);
+  if (!Number.isFinite(n)) throw new Error('Non-numeric inventory field: '+key);
+  return n;
+}
+/* === HUB_PO_INVENTORY_SCOPE_R1_END === */
+
+
+
+
+/* === HUB_PO_TX_PROBE_R1 === */
+function hub_probeTransactionEndpoints() {
+  const props = PropertiesService.getScriptProperties();
+  const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+  const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+  if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+
+  const tokenInfo = hub_strivenAccessToken_(clientId, clientSecret);
+  const endpoints = [
+    '/v1/invoices/search',
+    '/v1/credit-memos/search',
+    '/v1/sales-receipts/search'
+  ];
+  const payloads = [
+    { PageIndex: 0, PageSize: 2, SortExpression: 'TransactionDate', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2, SortExpression: 'Date', SortOrder: 2 },
+    { PageIndex: 0, PageSize: 2 }
+  ];
+  const rows = [['Endpoint','Payload','HTTP','Response Preview']];
+
+  endpoints.forEach(function(path) {
+    payloads.forEach(function(payload) {
+      const response = UrlFetchApp.fetch('https://api.striven.com' + path, {
+        method: 'post',
+        headers: {
+          Authorization: 'Bearer ' + tokenInfo.accessToken,
+          Accept: 'application/json'
+        },
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+      rows.push([
+        path,
+        JSON.stringify(payload),
+        response.getResponseCode(),
+        hub_safeExternalText_(response.getContentText(), 2000)
+      ]);
+    });
+  });
+
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName('PO_TX_PROBE');
+  if (!sh) sh = ss.insertSheet('PO_TX_PROBE');
+  sh.clearContents();
+  sh.getRange(1,1,rows.length,rows[0].length).setValues(rows);
+  sh.setFrozenRows(1);
+  sh.autoResizeColumns(1, rows[0].length);
+  return {status:'PASS', rows:rows.length - 1};
+}
+/* === HUB_PO_TX_PROBE_R1_END === */
+
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1 === */
+/**
+ * Google Apps Script: read-only source inspection; manual execution.
+ * Outputs complete response bodies to PO_DATA_CONTRACT_PROBE, never public logs.
+ * No transaction totals or inventory numbers are inferred from this probe.
+ */
+function hub_probePoDataContracts() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('PO data contract probe already running.');
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const prior = ss.getSheetByName('PO_TX_PROBE');
+    if (!prior || prior.getLastRow() < 2) throw new Error('Run hub_probeTransactionEndpoints first.');
+    const sourceRows = prior.getRange(2,1,prior.getLastRow()-1,4).getValues();
+    const requests = [];
+    const seen = {};
+    sourceRows.forEach(function(row) {
+      if (Number(row[2]) !== 200) return;
+      let p;
+      try { p = JSON.parse(String(row[3])); } catch(e) { return; }
+      if (!Array.isArray(p.data)) return;
+      let root = '';
+      if (row[0] === '/v1/invoices/search') root = '/v1/invoices/';
+      if (row[0] === '/v1/credit-memos/search') root = '/v1/credit-memos/';
+      if (!root) return;
+      p.data.slice(0,2).forEach(function(x) {
+        if (!x || !Number.isInteger(Number(x.id)) || Number(x.id) <= 0) return;
+        const path = root + Number(x.id);
+        if (seen[path]) return;
+        seen[path] = true;
+        requests.push({path:path,method:'get',body:null});
+      });
+    });
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:1,PageSize:2}});
+    requests.push({path:'/v1/credit-memos/search',method:'post',body:{PageIndex:0,PageSize:3}});
+    const scope = ss.getSheetByName('PO_ITEM_SCOPE');
+    if (!scope || scope.getLastRow() < 2) throw new Error('PO_ITEM_SCOPE missing.');
+    const scopeRows = scope.getDataRange().getValues();
+    const idCol = scopeRows[0].indexOf('Item ID');
+    if (idCol < 0) throw new Error('PO_ITEM_SCOPE missing Item ID.');
+    const asOfDate = Utilities.formatDate(new Date(), 'America/Toronto', 'yyyy-MM-dd');
+    scopeRows.slice(1).filter(function(row) { return Number(row[idCol]) > 0 && Number(row[idCol]) !== 36935; })
+      .slice(0,2).forEach(function(row) {
+        requests.push({path:'/v1/items/'+Number(row[idCol])+'/inventory-locations?asofDate='+asOfDate,method:'get',body:null});
+      });
+    if (!requests.some(function(x) { return x.path.indexOf('/v1/invoices/') === 0; })) {
+      throw new Error('No parseable successful invoice sample; existing probe output retained.');
+    }
+    const props = PropertiesService.getScriptProperties();
+    const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+    if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+    const token = hub_strivenAccessToken_(clientId,clientSecret);
+    const snapshot = new Date().toISOString();
+    const rows = requests.map(function(x) {
+      const options = {method:x.method,headers:{Authorization:'Bearer '+token.accessToken,Accept:'application/json'},muteHttpExceptions:true};
+      if (x.body) { options.contentType='application/json'; options.payload=JSON.stringify(x.body); }
+      const response = UrlFetchApp.fetch('https://api.striven.com'+x.path,options);
+      const status = response.getResponseCode();
+      if (status === 401) {
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN');
+        props.deleteProperty('HUB_STRIVEN_ACCESS_TOKEN_EXPIRES_AT_MS');
+        throw new Error('Striven authorization expired; existing probe retained.');
+      }
+      const text = response.getContentText();
+      if (text.length > 45000) throw new Error('Response exceeds cell limit; refusing truncated contract evidence.');
+      let keys = '';
+      try { const p=JSON.parse(text); keys=Array.isArray(p)?'ARRAY':Object.keys(p||{}).join(', '); } catch(e) {}
+      return [snapshot,x.method.toUpperCase(),x.path,x.body?JSON.stringify(x.body):'',status,keys,text];
+    });
+    hub_writeTableSheet_(ss,'PO_DATA_CONTRACT_PROBE',
+      ['Snapshot UTC','Method','Endpoint','Request','HTTP','Top-level Fields','Full Response'],rows);
+    const failures=rows.filter(function(r) { return r[4] < 200 || r[4] >= 300; }).length;
+    return {status:failures?'PARTIAL':'PASS',requests:rows.length,httpFailures:failures,strivenWritesPerformed:false};
+  } finally { lock.releaseLock(); }
+}
+/* === HUB_PO_DATA_CONTRACT_PROBE_R1_END === */
+
+/** Google Apps Script: read-only report contract inspection. Keys stay in private config. */
+function hub_probePoReportFeeds() {
+  const ss=SpreadsheetApp.getActive();
+  const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG');
+  if(!cfg) throw new Error('PO report private configuration missing.');
+  const props=PropertiesService.getScriptProperties();
+  const id=props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID');
+  const secret=props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET');
+  if(!id||!secret)throw new Error('Striven credentials missing.');
+  const token=hub_strivenAccessToken_(id,secret).accessToken;
+  const urls=cfg.getRange('B2:B3').getValues().map(r=>String(r[0]).trim());
+  const rows=urls.map(function(url,i){
+    if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+$/.test(url))throw new Error('Invalid configured report feed '+(i+1));
+    const response=UrlFetchApp.fetch(hub_reportPagedUrl_(url,0,2),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});
+    const http=response.getResponseCode();
+    if(http!==200)throw new Error('Report feed '+(i+1)+' HTTP '+http+'; prior output retained.');
+    let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Report feed '+(i+1)+' returned non-JSON.');}
+    const sample=JSON.stringify(p);
+    if(sample.length>45000)throw new Error('Report page exceeds evidence cell size.');
+    return [new Date().toISOString(),i+1,http,Array.isArray(p)?'ARRAY':Object.keys(p).join(', '),sample];
+  });
+  hub_writeTableSheet_(ss,'PO_REPORT_CONTRACT_PROBE',['Snapshot UTC','Feed','HTTP','Fields','Response'],rows);
+  return {status:'PASS',feeds:rows.length,strivenWritesPerformed:false};
+}
+
+/** Google Apps Script — PO product population reporting, manual refresh only. */
+function hub_refreshPoAnalysis() {
+  const guard=LockService.getDocumentLock();
+  if(!guard.tryLock(10000))throw new Error('PO analysis already running.');
+  const ss=SpreadsheetApp.getActive(),snap=new Date().toISOString();hub_poDeadlineMs_=Date.now()+330000;hub_poRetryCount_=0;
+  try {
+    hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','RUNNING',snap]]);
+    const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG');
+    if(!cfg)throw new Error('Private report configuration missing.');
+    const props=PropertiesService.getScriptProperties();
+    const token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID'),props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
+    const feeds=cfg.getRange('B2:B3').getValues().map(r=>String(r[0]).trim());
+    const sales=hub_poFeed_(feeds[0],token,'TransactionDetailId');
+    const pos=hub_poFeed_(feeds[1],token,'PurchaseOrderDetailId');
+    const salesFields=['TransactionDetailId','Description','Qty','InventoryLocation','Amount','UnitofMeasure','ItemName','TransactionNumber','TransactionTransactionDate','TransactionType','ItemItemId','TransactionTransactionId','TransactionStatus','TransactionHistoricalNonPosting','ItemNumber'];
+    const poFields=['PurchaseOrderNumber','ItemSalesOrderNumber','ItemSalesOrderName','ItemCustomerNumber','ItemCustomerName','ItemNumber','ItemName','Qty','UnitCost','Amount','QtyBilled','BilledTotal','PurchaseOrderDetailId','ItemItemId','PurchaseOrderPurchaseOrderId'];
+    hub_poSchema_(sales,salesFields);hub_poSchema_(pos,poFields);
+    // Re-read the three validated PO records so normal order edits update the product population.
+    hub_refreshPoSalesScope();
+    const oldScope=ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues();
+    const scope={};const detail=pos.filter(r=>['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))>=0);
+    detail.forEach(r=>{const id=String(r.ItemItemId);if(!/^\d+$/.test(id)||Number(id)<=0)throw new Error('Invalid PO Item ID.');if(!scope[id])scope[id]=[Number(id),String(r.ItemNumber||''),String(r.ItemName||''),0,0,0,0,0,0,''];const x=scope[id],q=hub_poNum_(r.Qty);x[3+['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))]+=q;x[6]+=q;x[8]++;});
+    Object.values(scope).forEach(r=>{r[7]=r.slice(3,6).filter(v=>v!==0).length;if(r[1]==='ENTERNEWPART')r[9]='PLACEHOLDER: identity unresolved';});
+    const prior=oldScope.slice(1).filter(r=>r[0]!==''),current=Object.values(scope);
+    if(prior.length!==current.length||current.some(r=>!prior.some(p=>String(p[0])===String(r[0])&&Number(p[6])===r[6])))throw new Error('Selected PO scope changed; retained prior results for review.');
+    // Validate all external values before publishing any sales or PO data.
+    sales.forEach(r=>{hub_poDate_(r.TransactionTransactionDate);hub_poNum_(r.Qty);hub_poNum_(r.Amount);if(['Invoice','Sales Receipt','Credit Memo'].indexOf(r.TransactionType)<0)throw new Error('Unexpected transaction type.');if(['Active','Voided'].indexOf(r.TransactionStatus)<0)throw new Error('Unexpected transaction status.');if(['Yes','No'].indexOf(r.TransactionHistoricalNonPosting)<0)throw new Error('Unexpected nonposting flag.');});
+    const through=[Utilities.formatDate(new Date(Date.now()-86400000),'America/Toronto','yyyy-MM-dd'),'2026-12-31'].sort()[0];
+    const sourceThrough=String(cfg.getRange('B4').getDisplayValue());
+    if(!/^2026-\d{2}-\d{2}$/.test(sourceThrough)||sourceThrough<through)throw new Error('Sales report cutoff is stale; update native report and source cutoff.');
+    const invResult=hub_refreshPoInventoryScope();
+    const invRows=ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues(),iv={};invRows.slice(1).forEach(r=>iv[String(r[1])]=r);
+    const aliasInventory=hub_poAliasInventory_(iv,token,through);
+    const result=hub_poCompute_(sales,scope,iv,through);
+    hub_poTable_(ss,'PO_ALIAS_INVENTORY',aliasInventory);
+    hub_poTable_(ss,'PO_API_SALES_LINES',[salesFields].concat(sales.map(r=>salesFields.map(k=>r[k]==null?'':r[k]))));
+    hub_poTable_(ss,'PO_API_ORDER_LINES',[poFields].concat(pos.map(r=>poFields.map(k=>r[k]==null?'':r[k]))));
+    hub_poTable_(ss,'PO_ORDER_DETAIL',[poFields].concat(detail.map(r=>poFields.map(k=>r[k]==null?'':r[k]))));
+    hub_poTable_(ss,'PO_SALES_SUMMARY',result.summary);
+    hub_poTable_(ss,'PO_TRANSACTION_AUDIT',result.audit);
+    hub_poTable_(ss,'PO_RETURN_REVIEW',result.review);
+    hub_poTable_(ss,'PO_SKU_REVIEW',result.aliases);
+    hub_poTable_(ss,'PO_ITEM_IDENTITY_REVIEW',result.identityReview);
+    SpreadsheetApp.flush();
+    if(ss.getSheetByName('PO_API_SALES_LINES').getLastRow()-1!==sales.length||ss.getSheetByName('PO_SALES_SUMMARY').getLastRow()-1!==current.length)throw new Error('Published row count mismatch.');
+    const out={status:'PASS_WITH_EXCEPTIONS',salesRows:sales.length,poRows:pos.length,selectedPoLines:detail.length,items:current.length,ordered:current.reduce((n,r)=>n+r[6],0),grossJanJun:result.gross[0],grossJulThrough:result.gross[1],returnReviewLines:result.review.length-1,identityReviewLines:result.identityReview.length-1,aliasReviewRows:result.aliases.slice(1).filter(r=>String(r[5]).indexOf('REVIEW:')===0).length,through:through,snapshot:snap,rateLimitRetries:hub_poRetryCount_,strivenWritesPerformed:false};
+    hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','PASS_WITH_EXCEPTIONS',snap],['Sales through',through,'Actual transactions only; no Jul-Dec forecast'],['API sales import','PASS',sales.length+' unique rows; pagination exhausted and counts reconciled'],['API PO import','PASS',pos.length+' unique rows'],['Selected PO scope','PASS',detail.length+' lines; '+current.length+' Item IDs; '+out.ordered+' ordered'],['Inventory','PASS',invRows[1][13]],['Returns','REVIEW',out.returnReviewLines+' lines; physical returns unknown unless explicitly classified'],['SKU aliases','REVIEW',out.aliasReviewRows+' pending relationships; no unproven consolidation'],['Product identity','REVIEW',out.identityReviewLines+' unresolved sales lines; generic placeholders excluded from product totals'],['Attribution','PRODUCT POPULATION','Sales for listed products; no physical PO-lot attribution'],['Schedule','MANUAL','Central Hub > Refresh Complete PO Analysis'],['Safety','PASS','No Striven writes; prior sales retained on source validation failures']]);
+    Logger.log(JSON.stringify(out));return out;
+  }catch(e){hub_poTable_(ss,'PO_REPORT_STATUS',[['Check','Status','Evidence'],['Refresh','FAILED',snap],['Reason','ACTION REQUIRED',String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]')],['Results','STALE','Last successful outputs retained where available; do not treat as a successful refresh']]);throw new Error(String(e.message).replace(/https:\/\/\S+/g,'[redacted URL]'));}finally{guard.releaseLock();}
+}
+function hub_poFeed_(url,token,key){
+ if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+$/.test(url))throw new Error('Invalid private feed URL.');
+ let expected=null,all=[],seen={};
+ for(let page=0;page<100;page++){
+   let response;try{response=hub_poReadFetch_(hub_reportPagedUrl_(url,page,500),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});}catch(e){throw new Error('Report network failure on page '+page);}
+   if(response.getResponseCode()!==200)throw new Error('Report HTTP '+response.getResponseCode()+' on page '+page);
+   let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Report response is not JSON.');}
+   if(!Array.isArray(p.data)||!Number.isInteger(p.totalRecords)||p.pageIndex!==page)throw new Error('Unexpected report paging contract.');
+   if(expected===null)expected=p.totalRecords;if(expected!==p.totalRecords)throw new Error('Report changed during paging; retry.');
+   p.data.forEach(r=>{const id=String(r[key]);if(!/^\d+$/.test(id)||seen[id])throw new Error('Missing/duplicate report line identity.');seen[id]=true;all.push(r);});
+   if(!p.nextPage){if(all.length!==expected)throw new Error('Report count reconciliation failed.');if(!all.length)throw new Error('Empty report source.');return all;}
+   if(!p.data.length)throw new Error('Empty page with continuation.');
+ }
+ throw new Error('Report exceeded bounded page limit.');
+}
+function hub_poSchema_(rows,fields){rows.forEach(r=>{const keys=Object.keys(r);if(keys.length!==fields.length||fields.some(k=>!Object.prototype.hasOwnProperty.call(r,k)))throw new Error('Report columns changed; review source schema.');});}
+function hub_poNum_(v){if(v==null||v===''||!Number.isFinite(Number(v)))throw new Error('Missing or invalid numeric value.');return Number(v);}
+function hub_poDate_(v){const m=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(v));if(!m)throw new Error('Unexpected transaction date format.');const d=new Date(Date.UTC(+m[3],+m[1]-1,+m[2]));if(d.getUTCMonth()!==+m[1]-1||d.getUTCDate()!==+m[2])throw new Error('Invalid transaction date.');return m[3]+'-'+m[1]+'-'+m[2];}
+function hub_poCompute_(sales,scope,iv,through){
+ const header=['Line ID','Transaction ID','Transaction number','Date','Type','Status','Nonposting','Item ID','SKU','Item name','Description','Qty','Amount CAD','Inventory location','Decision'];
+ const approved=hub_poApprovedAliases_();
+ const audit=[header.concat(['Canonical Item ID','Match method'])],review=[header.concat(['Canonical Item ID','Match method'])],identityReview=[header.concat(['Canonical Item ID','Match method'])],a={},gross=[0,0],aliases=[['Scoped Item ID','Scoped SKU','Candidate Item ID','Candidate SKU','Reason','Decision']],aliasSeen={};
+ Object.keys(scope).forEach(id=>a[id]=[0,0,0,0,0,0]);
+ Object.keys(approved).forEach(id=>{const d=approved[id];if(scope[d.canonical])aliases.push([Number(d.canonical),scope[d.canonical][1],Number(id),d.sku+' - INACTIVE',d.evidence,'APPROVED: same UPC']);});
+ // Keep possible equivalent Item IDs visible even when both IDs are directly on the selected POs.
+ const scopedItems=Object.values(scope);
+ scopedItems.forEach((x,i)=>scopedItems.slice(i+1).forEach(y=>{
+   const sx=String(x[1]),sy=String(y[1]);
+   if(!sx||sx.replace(/[HM]$/,'')!==sy.replace(/[HM]$/,''))return;
+   const first=/[HM]$/.test(sx)?x:y,second=first===x?y:x;
+   aliases.push([first[0],first[1],second[0],second[1],'Both Item IDs are on selected POs; normalized SKU matches. Product equivalence remains unproven.','REVIEW: keep separate until evidenced']);
+ }));
+ sales.forEach(r=>{const date=hub_poDate_(r.TransactionTransactionDate),rawId=String(r.ItemItemId),id=approved[rawId]?approved[rawId].canonical:rawId;if(approved[rawId]&&String(r.ItemNumber||'').replace(/\s*-\s*INACTIVE$/i,'')!==approved[rawId].sku)throw new Error('Approved alias SKU identity changed.');if(date<'2026-01-01'||date>through||date>'2026-12-31')return;
+ if(!scope[id]){const sku=String(r.ItemNumber||'').replace(/\s*-\s*INACTIVE$/i,'');Object.values(scope).forEach(s=>{if(sku&&(sku===s[1]||sku.replace(/H$/,'')===s[1].replace(/H$/,'')||sku.replace(/M$/,'')===s[1].replace(/M$/,''))){const k=s[0]+'|'+id;if(!aliasSeen[k]){aliases.push([s[0],s[1],Number(id),r.ItemNumber,'SKU variant / duplicate candidate','REVIEW: identity must be evidenced']);aliasSeen[k]=true;}}});return;}
+ const q=hub_poNum_(r.Qty),period=date<='2026-06-30'?0:1;let decision='EXCLUDED: void/nonposting';
+ if(r.TransactionStatus==='Active'&&r.TransactionHistoricalNonPosting==='No'){
+   if(scope[id][1]==='ENTERNEWPART'){decision='UNRESOLVED: placeholder does not identify a PO product';}else if(r.TransactionType==='Credit Memo'||q<0){decision='REVIEW: physical return vs financial adjustment';a[id][2+period]++;a[id][4+period]+=r.TransactionType==='Credit Memo'?-q:q;}else{decision='INCLUDED: gross sale';a[id][period]+=q;a[id][4+period]+=q;gross[period]+=q;}
+ }
+ const line=[r.TransactionDetailId,r.TransactionTransactionId,r.TransactionNumber,date,r.TransactionType,r.TransactionStatus,r.TransactionHistoricalNonPosting,r.ItemItemId,r.ItemNumber||'',r.ItemName||'',r.Description||'',q,r.Amount,r.InventoryLocation||'',decision,Number(id),rawId===id?'Exact Item ID':'Verified same-UPC alias'];audit.push(line);if(decision.indexOf('REVIEW:')===0)review.push(line);if(decision.indexOf('UNRESOLVED:')===0)identityReview.push(line);
+ });
+ const summary=[['Item ID','SKU','Item name','PO 2739 ordered','PO 2744 ordered','PO 2745 ordered','Total ordered','Jan-Jun gross sold','Jul-Dec gross sold to cutoff','Jan-Jun return-review lines','Jul-Dec return-review lines','Jan-Jun verified net sold','Jul-Dec verified net sold','Current on hand','Current available (Striven)','Inventory snapshot UTC','Exceptions','Jan-Jun accounting signed quantity','Jul-Dec accounting signed quantity','Current committed to SO','Current on PO','Sales through']];
+ Object.values(scope).sort((x,y)=>String(x[1]).localeCompare(String(y[1]))).forEach(s=>{const id=String(s[0]),n=a[id],v=iv[id];if(!v)throw new Error('Inventory item missing.');let ex=[s[9],v[10]];if(n[2]||n[3])ex.push('RETURN REVIEW');if(aliases.some((r,j)=>j>0&&(String(r[0])===id||String(r[2])===id)&&String(r[5]).indexOf('REVIEW:')===0))ex.push('SKU REVIEW: exact ID totals only');summary.push(s.slice(0,7).concat(n.slice(0,4),[n[2]?'':n[0],n[3]?'':n[1],v[4],v[11],v[13],ex.filter(Boolean).join('; '),n[4],n[5],v[5],v[6],through]));if(s[1]==='ENTERNEWPART'){const row=summary[summary.length-1];[7,8,11,12,17,18].forEach(j=>row[j]='');}});
+ return {summary:summary,audit:audit,review:review,aliases:aliases,gross:gross,identityReview:identityReview};
+}
+function hub_poTable_(ss,name,rows){const sh=ss.getSheetByName(name)||ss.insertSheet(name),cols=Math.max.apply(null,rows.map(r=>r.length));if(sh.getMaxRows()<rows.length)sh.insertRowsAfter(sh.getMaxRows(),rows.length-sh.getMaxRows());if(sh.getMaxColumns()<cols)sh.insertColumnsAfter(sh.getMaxColumns(),cols-sh.getMaxColumns());const matrix=rows.map(r=>r.concat(Array(cols-r.length).fill('')).map(v=>typeof v==='string'&&/^[=+@]/.test(v)?"'"+v:v));sh.clearContents();sh.getRange(1,1,matrix.length,cols).setValues(matrix);sh.setFrozenRows(1);sh.getRange(1,1,1,cols).setBackground('#19334d').setFontColor('#ffffff').setFontWeight('bold');if(sh.getFilter())sh.getFilter().remove();sh.getRange(1,1,Math.max(1,matrix.length),cols).createFilter();if(name.indexOf('PO_API_')===0)sh.hideSheet();}
+let hub_poDeadlineMs_=0;
+let hub_poRetryCount_=0;
+function hub_poReadFetch_(url,options) {
+  for(let attempt=0;attempt<3;attempt++){
+    if(hub_poDeadlineMs_&&Date.now()>hub_poDeadlineMs_-5000)throw new Error('Refresh time budget reached; retry the manual refresh.');
+    Utilities.sleep(850);
+    let response;try{response=UrlFetchApp.fetch(url,options);}catch(e){throw new Error('Striven network read failed.');}
+    if(response.getResponseCode()!==429)return response;
+    hub_poRetryCount_++;
+    if(attempt===2||(hub_poDeadlineMs_&&Date.now()+65000>hub_poDeadlineMs_))throw new Error('Striven rate limit persists; prior results retained.');
+    Utilities.sleep(61000);
+  }
+  throw new Error('Striven read retry exhausted.');
+}
+function hub_poApprovedAliases_(){return {'31638':{canonical:'42950',sku:'TQ285X-RD-1-A',evidence:'Active and inactive Striven Item records both have UPC 629162133939; same product name and manufacturer SKU. Checked 2026-10-07. Manufacturer: https://www.napoleon.com/en/ca/barbecues/products/portable-grills/travelq-series/travelq-285x-tq285x-rd-1'}};}
+function hub_poAliasInventory_(iv,token,through){
+ const rows=[['Canonical Item ID','Alias Item ID','Inventory location ID','Location','On hand','Available','On SO','On PO','Evidence']];
+ const aliases=hub_poApprovedAliases_();
+ Object.keys(aliases).forEach(id=>{const d=aliases[id],canonical=iv[d.canonical];if(!canonical)throw new Error('Approved alias canonical inventory missing.');const locs=hub_extractInventoryLocationRows_(hub_fetchItemInventoryLocations_(id,Utilities.formatDate(new Date(),'America/Toronto','yyyy-MM-dd'),token));
+ if(!locs.length){canonical[4]='';canonical[5]='';canonical[6]='';canonical[11]='';canonical[10]=String(canonical[10]||'')+'; APPROVED ALIAS INVENTORY UNKNOWN';return;}
+ locs.forEach(loc=>{const onHand=hub_requiredInventoryNumber_(loc,'qtyOnHand'),available=hub_requiredInventoryNumber_(loc,'qtyAvailable'),so=hub_requiredInventoryNumber_(loc,'qtyOnSalesOrders'),po=hub_requiredInventoryNumber_(loc,'qtyOnPurchaseOrders');if(canonical[4]!=='')canonical[4]+=onHand;if(canonical[5]!=='')canonical[5]+=so;if(canonical[6]!=='')canonical[6]+=po;if(canonical[11]!=='')canonical[11]+=available;rows.push([Number(d.canonical),Number(id),hub_requiredInventoryNumber_(loc,'inventoryLocationID'),loc.inventoryLocationName||'',onHand,available,so,po,d.evidence]);});
+ });return rows;
+}
+
+/** Google Apps Script — bounded read-only evidence for existing return-review lines. */
+function hub_collectPoReturnEvidence() {
+  const lock=LockService.getDocumentLock();
+  if(!lock.tryLock(10000))throw new Error('PO report operation already running.');
+  try {
+    const ss=SpreadsheetApp.getActive(),sh=ss.getSheetByName('PO_RETURN_REVIEW');
+    if(!sh||sh.getLastRow()<2)throw new Error('No return-review lines to inspect.');
+    const source=sh.getDataRange().getValues().slice(1),ids={};
+    source.forEach(r=>{if(!Number.isInteger(Number(r[1]))||Number(r[1])<=0)throw new Error('Invalid transaction identity.');if(['Invoice','Credit Memo','Sales Receipt'].indexOf(r[4])<0)throw new Error('Unexpected review type.');if(r[4]!=='Sales Receipt')ids[r[4]+'|'+r[1]]={type:r[4],id:Number(r[1])};});
+    const requests=Object.values(ids);
+    if(requests.length>40)throw new Error('Review exceeds bounded evidence read limit.');
+    const props=PropertiesService.getScriptProperties(),token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID'),props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
+    hub_poDeadlineMs_=Date.now()+180000;hub_poRetryCount_=0;
+    const evidence={},snapshot=new Date().toISOString();
+    requests.forEach(x=>{
+      const root=x.type==='Invoice'?'/v1/invoices/':'/v1/credit-memos/';
+      const response=hub_poReadFetch_('https://api.striven.com'+root+x.id,{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true});
+      if(response.getResponseCode()!==200)throw new Error('Return evidence HTTP '+response.getResponseCode()+' for transaction '+x.id);
+      let p;try{p=JSON.parse(response.getContentText());}catch(e){throw new Error('Return evidence is not JSON.');}
+      if(Number(p.id)!==x.id||!Array.isArray(p.lineItems))throw new Error('Unexpected return detail contract.');
+      evidence[x.type+'|'+x.id]=p;
+    });
+    const rows=[['Line ID','Transaction ID','Transaction number','Type','Item ID','Report qty','Matching detail quantities','Memo','Detail status','Historical nonposting','Evidence conclusion','Snapshot UTC']];
+    source.forEach(r=>{
+      const p=evidence[r[4]+'|'+r[1]];
+      if(!p){rows.push([r[0],r[1],r[2],r[4],r[7],r[11],'','','','','Sales Receipt detail unavailable in documented API; native source review required',snapshot]);return;}
+      const lines=[];
+      function collect(xs){xs.forEach(x=>{if(x.item&&String(x.item.id)===String(r[7]))lines.push(x.qty);if(Array.isArray(x.itemGroupLineItems))collect(x.itemGroupLineItems);});}
+      collect(p.lineItems);
+      rows.push([r[0],r[1],r[2],r[4],r[7],r[11],lines.join(', '),String(p.memo||''),typeof p.status==='object'?String(p.status.name||p.status.id||''):String(p.status||''),String(p.isHistoricalNonposting),'Accounting adjustment evidenced; physical receipt / financial-only classification not established',snapshot]);
+    });
+    hub_poTable_(ss,'PO_RETURN_EVIDENCE',rows);
+    const out={status:'PASS_WITH_UNCLASSIFIED_RETURNS',detailReads:requests.length,reviewLines:source.length,snapshot:snapshot,strivenWritesPerformed:false};
+    Logger.log(JSON.stringify(out));return out;
+  }finally{lock.releaseLock();}
+}
+
+/** Google Apps Script — inspect source changes without replacing the accepted scope. */
+function hub_inspectPoScopeChanges() {
+ const ss=SpreadsheetApp.getActive(),lock=LockService.getDocumentLock();
+ if(!lock.tryLock(10000))throw new Error('PO operation already running.');
+ try {
+  const cfg=ss.getSheetByName('PO_REPORT_PRIVATE_CONFIG'),props=PropertiesService.getScriptProperties(),token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID'),props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
+  hub_poDeadlineMs_=Date.now()+120000;hub_poRetryCount_=0;
+  const pos=hub_poFeed_(String(cfg.getRange('B3').getValue()).trim(),token,'PurchaseOrderDetailId'),current={};
+  const detail=pos.filter(r=>['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))>=0);
+  detail.forEach(r=>{const id=String(r.ItemItemId);if(!current[id])current[id]=[r.ItemNumber,0,0,0];current[id][1+['2739','2744','2745'].indexOf(String(r.PurchaseOrderNumber))]+=hub_poNum_(r.Qty);});
+  const prior={},rows=[['Item ID','SKU','Old PO2739 qty','New PO2739 qty','Old PO2744 qty','New PO2744 qty','Old PO2745 qty','New PO2745 qty','Change']];
+  ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!=='')prior[String(r[0])]=[r[1],Number(r[3]),Number(r[4]),Number(r[5])];});
+  [...new Set(Object.keys(prior).concat(Object.keys(current)))].forEach(id=>{const a=prior[id]||['',0,0,0],b=current[id]||['',0,0,0];if(!prior[id]||!current[id]||a.slice(1).some((n,j)=>n!==b[j+1]))rows.push([Number(id),b[0]||a[0],a[1],b[1],a[2],b[2],a[3],b[3],!prior[id]?'NEW ITEM':!current[id]?'REMOVED ITEM':'ORDERED QUANTITY CHANGED']);});
+  const fields=['PurchaseOrderNumber','ItemSalesOrderNumber','ItemSalesOrderName','ItemCustomerNumber','ItemCustomerName','ItemNumber','ItemName','Qty','UnitCost','Amount','QtyBilled','BilledTotal','PurchaseOrderDetailId','ItemItemId','PurchaseOrderPurchaseOrderId'];
+  hub_poTable_(ss,'PO_SCOPE_SOURCE',[fields].concat(detail.map(r=>fields.map(k=>r[k]==null?'':r[k]))));
+  hub_poTable_(ss,'PO_SCOPE_CHANGES',rows);
+  const out={status:'SCOPE_INSPECTED',poRows:pos.length,selectedLines:detail.length,items:Object.keys(current).length,ordered:detail.reduce((n,r)=>n+hub_poNum_(r.Qty),0),changes:rows.length-1};
+  Logger.log(JSON.stringify(out));return out;
+ }finally{lock.releaseLock();}
+}
+
+/** Google Apps Script — recompute reports from the last successful source/inventory snapshot, with no API reads. */
+function hub_rebuildPoAnalysisFromLastSnapshot() {
+ const lock=LockService.getDocumentLock();
+ if(!lock.tryLock(10000))throw new Error('PO analysis already running.');
+ try {
+  const ss=SpreadsheetApp.getActive(),status=ss.getSheetByName('PO_REPORT_STATUS').getDataRange().getValues();
+  if(!status.some(r=>r[0]==='Refresh'&&r[1]==='PASS_WITH_EXCEPTIONS'))throw new Error('A successful live snapshot is required before cached recomputation.');
+  const cached=ss.getSheetByName('PO_API_SALES_LINES').getDataRange().getValues(),fields=cached[0],seen={};
+  const sales=cached.slice(1).map(r=>{const x={};fields.forEach((k,i)=>x[k]=r[i]);if(x.TransactionTransactionDate instanceof Date)x.TransactionTransactionDate=Utilities.formatDate(x.TransactionTransactionDate,'America/Toronto','MM/dd/yyyy');const id=String(x.TransactionDetailId);if(!/^\d+$/.test(id)||seen[id])throw new Error('Invalid cached sales identity.');seen[id]=true;hub_poDate_(x.TransactionTransactionDate);hub_poNum_(x.Qty);hub_poNum_(x.Amount);return x;});
+  const scope={};ss.getSheetByName('PO_ITEM_SCOPE').getDataRange().getValues().slice(1).forEach(r=>{if(r[0]!==''){scope[String(r[0])]=r.slice();scope[String(r[0])][1]=String(r[1]||'');}});
+  const orders=ss.getSheetByName('PO_API_ORDER_LINES').getDataRange().getValues(),oh=orders[0],expected={};
+  const indexes=['PurchaseOrderNumber','ItemItemId','Qty'].map(k=>oh.indexOf(k));if(indexes.some(i=>i<0))throw new Error('Cached PO contract missing.');
+  orders.slice(1).forEach(r=>{const po=String(r[indexes[0]]),j=['2739','2744','2745'].indexOf(po);if(j<0)return;const id=String(r[indexes[1]]);if(!expected[id])expected[id]=[0,0,0];expected[id][j]+=hub_poNum_(r[indexes[2]]);});
+  if(Object.keys(expected).length!==Object.keys(scope).length||Object.keys(scope).some(id=>!expected[id]||expected[id].some((q,j)=>q!==Number(scope[id][j+3]))))throw new Error('PO scope changed since the successful source cache; run live refresh.');
+  const through=ss.getSheetByName('PO_SALES_SUMMARY').getRange('V2').getDisplayValue();
+  if(!/^2026-\d{2}-\d{2}$/.test(through))throw new Error('Successful snapshot cutoff missing.');
+  const iv={};ss.getSheetByName('PO_INVENTORY_SUMMARY').getDataRange().getValues().slice(1).forEach(r=>{if(r[1]!=='')iv[String(r[1])]=r.slice();});
+  const aliases=hub_poApprovedAliases_(),inventory=ss.getSheetByName('PO_ALIAS_INVENTORY').getDataRange().getValues().slice(1);
+  Object.keys(aliases).forEach(id=>{
+    const canonical=iv[aliases[id].canonical];if(!canonical)throw new Error('Canonical inventory missing.');
+    const rows=inventory.filter(r=>String(r[1])===id);if(!rows.length)throw new Error('Alias inventory snapshot missing; run live refresh.');
+    rows.forEach(r=>{[[4,4],[5,6],[6,7],[11,5]].forEach(pair=>{const value=hub_poNum_(r[pair[1]]);if(canonical[pair[0]]!=='')canonical[pair[0]]+=value;});});
+  });
+  const out=hub_poCompute_(sales,scope,iv,through);
+  hub_poTable_(ss,'PO_SALES_SUMMARY',out.summary);hub_poTable_(ss,'PO_TRANSACTION_AUDIT',out.audit);hub_poTable_(ss,'PO_RETURN_REVIEW',out.review);hub_poTable_(ss,'PO_SKU_REVIEW',out.aliases);hub_poTable_(ss,'PO_ITEM_IDENTITY_REVIEW',out.identityReview);
+  const now=new Date().toISOString(),prior=status.filter(r=>r[0]!=='Recompute'&&r[0]!=='Product identity');prior.push(['Product identity','REVIEW',(out.identityReview.length-1)+' unresolved sales lines; placeholders excluded from product totals'],['Recompute','PASS',now+'; no API reads; source and inventory freshness unchanged']);
+  hub_poTable_(ss,'PO_REPORT_STATUS',prior);
+  const result={status:'CACHED_RECOMPUTE_PASS',items:out.summary.length-1,grossJanJun:out.gross[0],grossJulThrough:out.gross[1],identityReviewLines:out.identityReview.length-1,apiReads:0,through:through};
+  Logger.log(JSON.stringify(result));return result;
+ }finally{lock.releaseLock();}
+}

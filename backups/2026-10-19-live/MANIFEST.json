@@ -1,0 +1,152 @@
+[
+  {
+    "project": "PRE_HUB",
+    "file": "OpenBalanceControlledTest.js",
+    "sha256": "d4b2adf525660d802824ed6bdfb414d20eba0902e1fa60acbcadc9f73afe7116"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "appsscript.json",
+    "sha256": "fa4173d61224d93d0a5cccd3d5a1181c88a6ed2abfdfde7e3205245b6a622f90"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "TMP_ValorStrivenHelpProbe.js",
+    "sha256": "a4947cb123030bb2466442263d532fe965bea8f8c996ee7688fd50b8eab0cee5"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "10_Central_Hub.js",
+    "sha256": "b2c78a39041b5d0adc21ba7808e8cbd2c70d9aa45256cef82600ec741082d627"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "90_Tests.js",
+    "sha256": "36eeab57f56d5b91befa7f54e2732aab07cef61c88a93065df249b21631a7951"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "Classic_Customer1_Reorder.js",
+    "sha256": "cc97614e4b88cf6fdc26a370740dac0f92b83973317d5757872fb12f9d0633ea"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "ReorderTest.js",
+    "sha256": "629380af1fb997807a8e23c82027ed6488341c5e16886739f3362776a0e44bfb"
+  },
+  {
+    "project": "PRE_HUB",
+    "file": "00_Config.js",
+    "sha256": "62466b107d89b21e7bc8af6d06e97b0acc29389f12ca58e3f453f2f184d151c6"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "manualcreation.js",
+    "sha256": "4996b742400301ca5aa3cf9d71d17d650c27c7ff47c7b0b77cc603b8ec1f1b81"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "01_config_menu.js",
+    "sha256": "4b8bc25fe533d900545684e559462b6231ee29731588469e3dbef209f8fbd6f1"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "99_enp_operational_logging.js",
+    "sha256": "17cc72e1d35055e657a621c17d79f836ee51bee151fc4e05d0c9247f953cf360"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "enternewpart_quoted.js",
+    "sha256": "05d18576a17de25d32f3c6db41f595d80b3916bb6fd1b0b9b7a3df175472601c"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "1. enp_config_menu.js",
+    "sha256": "3609477b0145ec2175345da82983d1c3bcc67a33f1840d5d313c513e385a2831"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "07_TestSO.js",
+    "sha256": "06837675f09104652be9613a3a216ca938231ae2f897f87c3a06fd7fd24b78f9"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "appsscript.json",
+    "sha256": "f32e20e649048cc6e4b3fb58a5ac1f5d4749c39413cbc7711da5010eead4b440"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "04_actionhub.js",
+    "sha256": "61023020012eb5cfb1d764d17f19a6b2d95e08e47cc90108bbcb3741d8c64f37"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "action_hub.js",
+    "sha256": "06f2083fe3966800e9055a98568177bd5d3c34ae12d10fff439e6b43136d475f"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "05_manual_item_creation.js",
+    "sha256": "94db2e6f474837a77a778a91c5170ad1bbd79834e15e2b5d4ebebc4cf9ea559a"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "06_Test.js",
+    "sha256": "d99723443ed385bddb8ed65523df5ea3ea84b296a56555f31a774de5b1419493"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "98_enp_item_resolution_guard.js",
+    "sha256": "e26b60e07784f1f4a900c7250e4870b7686d3980450b99c9ffd6ec9356acb169"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "enternewpart.js",
+    "sha256": "981e2509557ddfb309316daac5c7a5e3a3512f75bab004b2ec271d5f10f31cc3"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "config.js",
+    "sha256": "b433ac3ef53fbfd4282092a6583581e8527365a26f6ce1c079e06ac43e6bdc1d"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "auth.js",
+    "sha256": "56006a1461b32ab3642b7fdfb1f45ee3f15e9227cb42df0ead14246f240cdb21"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "newitem.js",
+    "sha256": "8f3928c80a1f6b4624bf49bca198c6eaa149f705d28a983d154ebe9e2b255f12"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "enternewpart_pipeline.js",
+    "sha256": "92711f02ed630e52ce4c90a790024a31cc465ca2fe7549b0c3d2bb2202c6e336"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "03_enternewpart_sync_and_actions.js",
+    "sha256": "9fdb3e456cd4296c52232cd9c9cfcc014f6cb93638e7876a2f15fe0f6601a3da"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "inventory.js",
+    "sha256": "2c1eed739d0399619780dbb6d4530e7e22fb3a358afbc82bdc64068e37ac6d02"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "02_striven_core.js",
+    "sha256": "e4e03f213c10c88189dd0168f24b938602ecf9f870d52f46deca94113b1a9941"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "report_sync.js",
+    "sha256": "a596d1c526b534b7ead34a051691e2ca39c0915e065626bfa1715d36b143e6b6"
+  },
+  {
+    "project": "PRE_ENP",
+    "file": "08_enp_guarded_pipeline_monitor.js",
+    "sha256": "3a76ab0af8803a5062bbf3303124a9557fb64a813d1d8ecf0b8182747762cdb2"
+  }
+]
