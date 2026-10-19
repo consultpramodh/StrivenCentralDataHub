@@ -1,0 +1,61 @@
+name: Inspect live ENTERNEWPART integration
+on:
+  push:
+    branches: [work/enternewpart-automation-20261019]
+    paths:
+      - ".github/workflows/enp-live-audit.yml"
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLASPRC_JSON"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Pull live projects read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p PRE_HUB/src PRE_ENP/src
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > PRE_HUB/.clasp.json
+          printf '%s' '{"scriptId":"1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj","rootDir":"src"}' > PRE_ENP/.clasp.json
+          clasp pull --project PRE_HUB
+          clasp pull --project PRE_ENP
+      - name: Inspect file inventory and source hashes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib,hashlib,json,re
+          out=[]
+          for root in ['PRE_HUB','PRE_ENP']:
+            for p in pathlib.Path(root,'src').glob('*'):
+              if not p.is_file(): continue
+              text=p.read_text()
+              # Refuse to publish source containing common hardcoded credentials.
+              suspicious = re.search(r'''(?i)(?:client_secret|access_token|refresh_token|password)\s*[:=]\s*["'][^"']{12,}["']''',text) or re.search(r'https://api\.striven\.com/v2/reports/[A-Za-z0-9_-]{20,}',text)
+              if suspicious: raise SystemExit('Hardcoded sensitive source detected; source artifact withheld.')
+              out.append({'project':root,'file':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          pathlib.Path('source-manifest.json').write_text(json.dumps(out,indent=2))
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enp-live-source-audit
+          path: |
+            PRE_HUB/src/
+            PRE_ENP/src/
+            source-manifest.json
+          retention-days: 7
