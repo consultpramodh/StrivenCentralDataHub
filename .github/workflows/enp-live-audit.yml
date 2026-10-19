@@ -40,13 +40,19 @@ jobs:
           python3 - <<'PY'
           import pathlib,hashlib,json,re
           out=[]
+          pathlib.Path('AUDIT_SOURCE').mkdir(exist_ok=True)
           for root in ['PRE_HUB','PRE_ENP']:
             for p in pathlib.Path(root,'src').glob('*'):
               if not p.is_file(): continue
               text=p.read_text()
               # Refuse to publish source containing common hardcoded credentials.
               suspicious = re.search(r'''(?i)(?:client_secret|access_token|refresh_token|password)\s*[:=]\s*["'][^"']{12,}["']''',text) or re.search(r'https://api\.striven\.com/v2/reports/[A-Za-z0-9_-]{20,}',text)
-              if suspicious: raise SystemExit('Hardcoded sensitive source detected; source artifact withheld.')
+              redacted = re.sub(r"""(?i)((?:client_secret|access_token|refresh_token|password)\s*[:=]\s*["'])([^"']{12,})(["'])""",r'\1[REDACTED]\3',text)
+              redacted = re.sub(r'https://api\.striven\.com/v2/reports/[A-Za-z0-9_-]{20,}','https://api.striven.com/v2/reports/[REDACTED]',redacted)
+              redacted = re.sub(r"""(?i)(Bearer\s+)[A-Za-z0-9._~+/-]{20,}""",r'\1[REDACTED]',redacted)
+              dest = pathlib.Path('AUDIT_SOURCE',root,'src',p.name)
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              dest.write_text(redacted)
               out.append({'project':root,'file':p.name,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
           pathlib.Path('source-manifest.json').write_text(json.dumps(out,indent=2))
           print(json.dumps(out,indent=2))
@@ -55,7 +61,6 @@ jobs:
         with:
           name: enp-live-source-audit
           path: |
-            PRE_HUB/src/
-            PRE_ENP/src/
+            AUDIT_SOURCE/
             source-manifest.json
           retention-days: 7
