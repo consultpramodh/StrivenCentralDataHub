@@ -158,3 +158,61 @@ flowchart TD
 ```
 
 Diagram scope: SO-linked processing. Item-only manual requests finish after verified item receipt. A failed reconciliation remains unresolved; it does not automatically repeat a mutation.
+
+
+## 8. Mandatory enrichment before new-item creation
+
+Added October 19, 2026 from the user's expanded field requirements. Status: design requirement, not implemented.
+
+Insert RESEARCH_PENDING -> ENRICHING -> VALIDATING_METADATA -> READY_TO_CREATE after current-line validation and authoritative item nonexistence resolution. Existing items follow reuse verification; enrichment must not overwrite their catalog metadata silently.
+
+Completeness means every named field has a disposition: VERIFIED, APPROVED_INTERNAL_RULE, NOT_APPLICABLE with reason, DEFERRED_TO_RECEIVING where appropriate, or UNRESOLVED. Required UNRESOLVED fields block creation. N/A/deferred values belong in the staging metadata, not literal text inserted into numeric, ID or Boolean API fields. Ignore the user's blank spacer columns. No arbitrary zero, true, invented UPC or serial number.
+
+| User column | Governing source and proposed rule |
+|---|---|
+| Item Number | Preserve approved internal SKU; cross-reference exact manufacturer/distributor SKU. Never replace it solely from a similar online result. |
+| Item Name | Official exact-product name; approved unique naming convention if collision; distinguish variants. |
+| Price | Approved CAD catalog selling-price rule/current Canadian price list. Keep requested SO line price separately; a public competitor price is evidence for review, not authorization to change either price. |
+| Cost | Current authenticated dealer price list, supplier quote or approved purchasing terms for the actual supplier, quantity and currency. Public retail price is never a substitute. Approved cost policy required; unknown does not become zero. |
+| Item Category | Map verified product facts into existing approved Striven category IDs; missing/ambiguous category blocks rather than inventing a taxonomy. |
+| Description | Factual summary of verified specifications and exact compatibility; no unsupported claims or wholesale copying of marketing text. |
+| Preferred Vendor | Internal approved purchasing relationship and valid vendor ID. Manufacturer and selling supplier may differ. Manufacturer-direct sourcing must be established internally. |
+| Manufacturer | Verified brand/manufacturer entity and approved Striven mapping; distinguish brand owner from distributor. |
+| Manufacturer Part# | Exact official manufacturer part number including meaningful suffixes; separate it from internal SKU and distributor code. |
+| Serial Number | First establish what this column means in the live sheet/API: unit serial, serial-tracking flag, or a business custom field. Actual unit serials come from the physical unit, receiving documents or authenticated asset records, not generic web research. Unit serial capture may be deferred to receiving; do not create one catalog SKU per serial. |
+| Location Name | Approved internal inventory/default-location mapping and valid ID. Do not infer stock location from a product page, vendor address or requester. Do not populate quantities/stock by assigning a default location. |
+| Taxable | Approved accounting/tax configuration for the actual item type; never infer from a vendor website or silently hardcode true. Unknown mapping requires accounting review. |
+| Item Type | Approved Striven item-type ID based on inventory/noninventory/service treatment; block missing/ambiguous type. |
+| UPC | Exact product variant and packaging level from official manufacturer/authorized distributor data, corroborated with GS1 where useful. Preserve leading zeros as text, validate length/check digit and identity. A valid checksum alone does not prove product ownership. Keep EAN/GTIN-14 separate unless a verified conversion/mapping is approved. |
+| MAP Price | Current authorized Canadian MAP policy for exact SKU and effective dates, currency and channel. Record explicitly verified no-MAP applicability separately from unknown; a competitor discount is not MAP. |
+
+Research priority: existing verified Hub enrichment -> current internal approved supplier documents/terms -> official manufacturer product page, manual or parts catalog -> authorized distributor/dealer source -> secondary retailer evidence for corroboration only. Internal sources govern internal fields; official catalog evidence governs product facts. Search snippets only locate documents; fetch/read the actual page or file before accepting a field. Record disagreements instead of majority voting.
+
+Product matching must establish exact SKU/MPN and manufacturer, region, fuel/voltage/size/finish, revision and pack quantity when material. No generic-name matches such as THERMOSTAT. Do not assume G190-0004-SER is Napoleon, Ortal or another manufacturer until primary evidence establishes identity. Brand and SKU alone may be insufficient for compatibility.
+
+For each field retain value, disposition, source URL/document ID and version/page, retrieved time, effective dates, currency, pack/UOM, extraction method, reviewer/rule version and conflict notes. Retain original currency/value and approved FX source/date/conversion separately if conversion is authorized; conversion of a US MSRP/MAP does not establish Canadian MSRP/MAP.
+
+Cache research by exact product identity and source version; apply separate expiry rules for specifications, cost, retail price and MAP. Recheck time-sensitive commercial data before writing. Bound search work and place unresolved fields in one consolidated review case rather than repeated searches each tick. Never send customer names, SO private details or credentials to a public search engine; product identifiers are sufficient.
+
+Hub integration: propose versioned PRODUCT_ENRICHMENT, ITEM_FIELD_EVIDENCE and approved supplier/category/location/type mapping contracts as companion datasets. Do not silently expand the existing 15-field DATA_ITEMS contract: Manufacturer Part# and Serial Number are not canonical fields in the inspected Items schema. Confirm all API field names, reference IDs, writable versus derived fields, custom-field IDs and tracking semantics before implementing payloads. Extend the source adapter and payload builder together; a filled sheet alone does not establish that Striven received those columns.
+
+Write gate: exact identity + authoritative absence + validated current source line/authorization + required metadata dispositions + supported payload mapping + budget reservation. Persist evidence and command before POST, verify persisted supported fields by read-back, then publish receipt. If an applicable API cannot write a field required by policy, use REVIEW or an approved separate update step; never mark the item complete based on the sheet.
+
+Additional acceptance cases: wrong SKU suffix, wrong fuel/voltage/pack, US versus Canadian pricing, stale dealer cost/MAP, unknown cost, missing UPC versus verified no UPC, checksum-valid wrong product, brand/distributor conflict, ambiguous category, missing vendor/location IDs, serial-versus-tracking confusion, source conflict, blocked dealer access, prompt injection in source pages, search outage, metadata-field API rejection and failed field read-back.
+
+Primary identity reference checked: GS1, “How does serialisation differ from unique identification in the GS1 System?” https://support.gs1.org/support/solutions/articles/43000734238-how-does-serialisation-differ-from-unique-identification-in-the-gs1-system- . It distinguishes base product identity from an individual instance's serial number. The actual meaning of the user's Serial Number column remains unverified.
+
+
+## 9. Supplied reference rules — supersedes Serial Number uncertainty above
+
+The user supplied Pasted markdown(4).md and Pasted markdown (2).md as governing internal reference inputs. Both were read locally in full with blank/separator rows excluded from inspection.
+
+- Supplier reference: 47 populated rules, including 45 populated discount percentages and two missing discounts. Preserve all original column labels and values. Do not publish the commercial discount table into a public GitHub repository; load it from an access-controlled configuration source at runtime.
+- Category reference: 32 populated category-to-serial-tracking rules. Serial Numbers YES/NO means the desired serial-tracking policy; it is not a unit serial identifier. Stage it as SerialTrackingRequired and verify the actual Striven writable field/custom-field mapping before sending. Actual unit serial capture remains a separate receiving/asset operation.
+- The reference's Manufacturer column frequently identifies a supplier/distributor and its Preferred Vendor column a brand or product family. Do not swap columns or reinterpret blank cells automatically. Retain SourceVendorName, SourceManufacturer, SourcePreferredVendor and DiscountPercent; establish explicit target manufacturer/vendor IDs and family selectors through current Striven records and approved semantics.
+- Category matching must select one exact approved category after product verification; apply its supplied tracking Boolean directly. Unknown/unmapped categories block creation. Do not infer YES for every expensive item or NO for every equipment item.
+- Discounts must match the most specific supplier/product-family rule. Generic supplier matching cannot override a family-specific rule. Missing discounts remain unknown, never zero.
+- Proposed cost formula is eligible base price times (1 - discount rate), rounded under an approved money policy. The table does not state eligible base price, currency, effective dates, exclusions, freight/tax treatment or whether sequential discounts apply. These must be supplied/verified before automatic costing. Do not apply the discount to arbitrary web prices, MAP, or the customer SO line price. Direct supplier cost evidence can supersede a derived cost under a recorded precedence rule.
+- Online evidence verifies exact product identity, product facts and current applicable Canadian price source; internal references govern purchasing mappings and tracking policies. Cache both evidence versions with the draft.
+- Add regression cases for supplier-family precedence, missing discounts, blank source brand fields, ambiguous vendor/manufacturer mapping, unmapped category, each tracking flag, unknown price basis and conflicting direct quoted cost.
+- The named input tables are design references only; neither live configuration nor item payloads have been changed.
