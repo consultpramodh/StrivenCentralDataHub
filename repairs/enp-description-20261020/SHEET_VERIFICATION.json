@@ -1,0 +1,23 @@
+{
+  "rows": 65,
+  "completeFields": 60,
+  "changedRows": 26,
+  "changedItemNumbers": 19,
+  "changedItemNames": 22,
+  "changedPrices": 14,
+  "sourcePriceRepairs": 10,
+  "categories": {
+    "IDENTITY_REVIEW": 8,
+    "CONFLICTING_INFORMATION": 11,
+    "FORMAT_RECOVERED": 3,
+    "INCORRECT_INFORMATION": 2,
+    "PARTIAL_INFORMATION": 2,
+    "MULTI_ITEM": 1,
+    "STRUCTURED": 36,
+    "MANUAL_SOURCE": 2
+  },
+  "originalDescriptionsChanged": 0,
+  "soLinePricesChanged": 0,
+  "creationAuthorizationChanged": 0,
+  "formulaErrors": 0
+}
