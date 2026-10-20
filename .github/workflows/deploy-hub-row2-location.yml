@@ -1,0 +1,82 @@
+name: Repair Hub verified inventory location
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/deploy-hub-row2-location.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - run: npm install --no-save acorn@8.15.0 acorn-walk@8.3.4 eslint-scope@8.4.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull and verify current source before patching
+        run: |
+          set -euo pipefail
+          for D in PRE WORK FRESH POST; do
+            mkdir -p "$D/src"
+            printf '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$D/.clasp.json"
+          done
+          mkdir -p LEGACY/src
+          printf '{"scriptId":"1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj","rootDir":"src"}' > LEGACY/.clasp.json
+          clasp pull --project LEGACY
+          cmp LEGACY/src/03_enternewpart_sync_and_actions.js repairs/enp-legacy-execution-20261020/ENP/03_enternewpart_sync_and_actions.js
+          cmp LEGACY/src/98_enp_item_resolution_guard.js repairs/enp-legacy-execution-20261020/ENP/98_enp_item_resolution_guard.js
+          cmp LEGACY/src/02_striven_core.js repairs/enp-description-20261020/ENP/02_striven_core.js
+          node repairs/enp-parity-20261020/test.cjs LEGACY/src
+          node repairs/enp-legacy-execution-20261020/test.cjs LEGACY/src
+          clasp pull --project PRE
+          node repairs/hub-row2-execution-20261020/build.cjs LEGACY/src repairs/hub-row2-execution-20261020/PRE/10_Central_Hub.js repairs/hub-row2-location-20261020/PRE/native-overrides.js EXPECTED_HUB.js
+          cmp PRE/src/10_Central_Hub.js EXPECTED_HUB.js
+          cp -a PRE/src/. WORK/src/
+          node repairs/hub-row2-execution-20261020/build.cjs LEGACY/src repairs/hub-row2-execution-20261020/PRE/10_Central_Hub.js repairs/hub-row2-location-20261020/native-overrides.js WORK/src/10_Central_Hub.js
+          mv WORK/src/10_Central_Hub.js.receipt.json BUNDLE_RECEIPT.json
+          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
+          node repairs/hub-row2-location-20261020/test.cjs WORK/src
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hub-row2-location-full-pre
+          path: PRE
+          retention-days: 30
+      - name: Patch same project and verify complete source
+        run: |
+          set -euo pipefail
+          rollback() { trap - ERR; clasp push --force --project PRE; exit 1; }
+          trap rollback ERR
+          clasp push --force --project WORK
+          clasp pull --project POST
+          diff -qr WORK/src POST/src
+          node repairs/enp-search-empty-20261020/test.cjs POST/src/10_Central_Hub.js
+          node repairs/hub-row2-location-20261020/test.cjs POST/src
+          find POST -type f -exec sha256sum {} + > POST_SHA256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hub-row2-location-pre-post
+          path: |
+            PRE
+            POST
+            POST_SHA256.txt
+            LEGACY
+            WORK
+            BUNDLE_RECEIPT.json
+          retention-days: 30
+# Build revision 2: avoid CommonJS reserved binding.
