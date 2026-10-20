@@ -1,0 +1,13 @@
+{
+  "checks": 26,
+  "externalNetworkAttempts": 0,
+  "liveHubRecords": 65,
+  "liveHubAuthorizedRows": 0,
+  "liveHubPreviewReady": 0,
+  "limitations": [
+    "No live Striven write test",
+    "Serial tracking write path unverified",
+    "MAP price write path unverified when populated",
+    "Verified reference registry not populated"
+  ]
+}
