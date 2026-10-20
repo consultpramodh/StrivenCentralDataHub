@@ -1,0 +1,32 @@
+name: Run ENTERNEWPART exact lookup
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/run-enp-exact-lookup.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Run existing exact lookup worker
+        run: |
+          mkdir -p RUN
+          printf '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8"}' > RUN/.clasp.json
+          clasp run hub_processItemLookups --project RUN
