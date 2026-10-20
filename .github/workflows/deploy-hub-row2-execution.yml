@@ -78,3 +78,4 @@ jobs:
             WORK
             BUNDLE_RECEIPT.json
           retention-days: 30
+# Build revision 2: avoid CommonJS reserved binding.
