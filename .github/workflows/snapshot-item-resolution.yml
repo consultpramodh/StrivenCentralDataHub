@@ -1,0 +1,39 @@
+name: Snapshot item resolution sources
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/snapshot-item-resolution.yml"]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing clasp authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull existing projects without changes
+        run: |
+          mkdir -p SNAPSHOT/HUB/src SNAPSHOT/ENP/src
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > SNAPSHOT/HUB/.clasp.json
+          printf '%s' '{"scriptId":"1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj","rootDir":"src"}' > SNAPSHOT/ENP/.clasp.json
+          clasp pull --project SNAPSHOT/HUB
+          clasp pull --project SNAPSHOT/ENP
+          find SNAPSHOT -type f -exec sha256sum {} + > SOURCE_SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: item-resolution-live-pre
+          path: |
+            SNAPSHOT
+            SOURCE_SHA256.txt
+          retention-days: 14
