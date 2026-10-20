@@ -1,0 +1,24 @@
+{
+  "platform": "Google Sheets",
+  "manufacturerPart": {
+    "rule": "Manufacturer Part# equals Item Number exactly; blank Item Number remains blank",
+    "range": "ENTERNEWPART!J2:J500",
+    "relativeFormula": "=IF(B2=\"\",\"\",B2)"
+  },
+  "currency": {
+    "rule": "All existing item prices are CAD; no conversion",
+    "range": "ENTERNEWPART!Q2:Q66",
+    "confirmedBy": "User, 2026-10-20"
+  },
+  "cost": {
+    "rule": "Price times one minus user-confirmed or source-mapped applicable vendor discount",
+    "preservePositiveCatalogCost": true
+  },
+  "verification": {
+    "manufacturerPartMatches": 65,
+    "currencyRows": 65,
+    "formulaErrors": 0,
+    "existingSalesOrderHyperlinks": 61
+  },
+  "scope": "Worksheet edits only. No Apps Script deployment, Striven item creation or Sales Order write performed."
+}
