@@ -1,0 +1,2 @@
+/* Node.js — ignore unused checkbox/formula rows in the Hub preview. */
+const fs=require('fs'),assert=require('assert');const f=process.argv[2];let s=fs.readFileSync(f,'utf8');const old="if(!values.some(function(v){return v!==''&&v!=null;}))continue;",replacement="if(!['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[h[key]]);}))continue;";assert.equal(s.split(old).length,2,'Preview baseline changed');s=s.replace(old,replacement);new (require('vm').Script)(s);fs.writeFileSync(f,s);

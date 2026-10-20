@@ -336,7 +336,7 @@ function enp_hubPreviewAllRows_() {
  const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),results=[];
  const h=enp_indexByHeader_(grid[0]);
  for(let row=2;row<=grid.length;row++){
-  const values=grid[row-1];if(!values.some(function(v){return v!==''&&v!=null;}))continue;
+  const values=grid[row-1];if(!['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[h[key]]);}))continue;
   if(enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'){results.push({row:row,status:'COMPLETED'});continue;}
   try{const plan=enp_hubPlanRow_(grid,row);results.push({row:row,status:'ELIGIBLE',itemNumber:plan.record['Item Number']});}
   catch(e){results.push({row:row,status:values[h['Create Authorized']]===true?'REVIEW':'UNAUTHORIZED',reason:String(e.message||e)});}

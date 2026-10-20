@@ -194,4 +194,11 @@ test('actual legacy line application works without the old location property',()
  assert.equal(line.item.id,9901);assert.equal(line.inventoryLocation.id,902);assert.equal(line.qty,2);assert.equal(line.price,8);
 });
 
+
+test('preview ignores unused rows containing FALSE checkboxes',()=>{
+ const g=grid(gen({'Workflow Status':'COMPLETED'})),empty=g[0].map(()=>''),idx=g[0].indexOf('Create Authorized');empty[idx]=false;g.push(empty);
+ c.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>g})})});
+ const p=c.enp_hubPreviewAllRows_();assert.equal(p.rows,1);assert.equal(p.completed,1);assert.equal(p.unauthorized,0);
+});
+
 assert.equal(network,0);console.log(JSON.stringify({checks,externalNetworkAttempts:network}));
