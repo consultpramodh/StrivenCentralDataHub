@@ -143,15 +143,60 @@ test('failed rows back off and stop after three unchanged attempts',()=>{
  const p=a.x.enp_hubPlanRow_([Object.keys(gen()),Object.values(gen())],2);
  a.data.set('HUB_ENP_ROW_STATE_2',JSON.stringify({fingerprint:p.fingerprint,attempts:3,nextAt:0}));assert.equal(a.run().processed,0);
 });
-test('installer is idempotent and changes only its own trigger',()=>{
- const x=ctx(),triggers=[],props=new Map(),made=[];
- x.ScriptApp={getProjectTriggers:()=>triggers,newTrigger:n=>({timeBased(){return this},everyMinutes(m){assert.equal(m,5);return this},create(){made.push(n);triggers.push({getHandlerFunction:()=>n});}}),deleteTrigger(){}};
- x.PropertiesService={getScriptProperties:()=>({setProperty:(k,v)=>props.set(k,v)})};
- x.hub_previewEnternewpartAutomation=()=>({eligible:0,completed:1,unauthorized:64});
+
+function torontoUtilities(){return {...util(),formatDate(date,zone,format){
+ assert.equal(zone,'America/Toronto');
+ if(format==='Z'){const p=new Intl.DateTimeFormat('en-US',{timeZone:zone,timeZoneName:'longOffset'}).formatToParts(date).find(x=>x.type==='timeZoneName').value;return p.replace('GMT','').replace(':','')||'+0000';}
+ const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(date),p=Object.fromEntries(parts.map(x=>[x.type,x.value]));
+ const day=p.year+'-'+p.month+'-'+p.day;return format==='yyyy-MM-dd'?day:day+' '+p.hour+':'+p.minute;
+}};}
+test('Toronto schedule has exactly the requested six daily slots',()=>{
+ const x=ctx();x.Utilities=torontoUtilities();
+ const pairs=[
+ ['2026-10-20T11:59:00Z','2026-10-20T12:00:00.000Z'],
+ ['2026-10-20T12:00:00Z','2026-10-20T14:00:00.000Z'],
+ ['2026-10-20T14:00:00Z','2026-10-20T16:00:00.000Z'],
+ ['2026-10-20T16:00:00Z','2026-10-20T18:00:00.000Z'],
+ ['2026-10-20T18:00:00Z','2026-10-20T20:00:00.000Z'],
+ ['2026-10-20T20:00:00Z','2026-10-20T22:00:00.000Z'],
+ ['2026-10-20T22:00:00Z','2026-10-21T12:00:00.000Z'],
+ ['2026-10-21T02:00:00Z','2026-10-21T12:00:00.000Z']];
+ for(const [now,next]of pairs)assert.equal(x.hub_nextEnternewpartRun_(new Date(now)).toISOString(),next);
+});
+test('Toronto schedule handles both daylight-saving transitions and year rollover',()=>{
+ const x=ctx();x.Utilities=torontoUtilities();
+ for(const [now,next]of [
+ ['2026-10-31T22:01:00Z','2026-11-01T13:00:00.000Z'],
+ ['2026-03-07T23:01:00Z','2026-03-08T12:00:00.000Z'],
+ ['2026-12-31T23:01:00Z','2027-01-01T13:00:00.000Z']]){
+ assert.equal(x.hub_nextEnternewpartRun_(new Date(now)).toISOString(),next);
+ }
+});
+test('installer replaces the five-minute timer, remains singular and preserves unrelated triggers',()=>{
+ const x=ctx();x.Utilities=torontoUtilities();let triggers=[{getUniqueId:()=> 'old',getHandlerFunction:()=> 'hub_processEnternewpartAutomation'},{getUniqueId:()=> 'other',getHandlerFunction:()=> 'unrelated'}],n=0;const props=new Map();
+ x.ScriptApp={getProjectTriggers:()=>triggers,newTrigger:name=>({timeBased(){return this},at(date){assert(date.getTime()>Date.now());this.date=date;return this},create(){const id='new'+(++n),t={getUniqueId:()=>id,getHandlerFunction:()=>name};triggers.push(t);return t;}}),deleteTrigger:t=>{triggers=triggers.filter(y=>y.getUniqueId()!==t.getUniqueId())}};
+ x.LockService={getScriptLock:()=>({waitLock(){},releaseLock(){}})};
+ x.PropertiesService={getScriptProperties:()=>({setProperty:(k,v)=>props.set(k,v),getProperty:k=>props.get(k)||null})};
+ x.hub_previewEnternewpartAutomation=()=>({eligible:0,completed:1,review:64});
  assert.equal(x.hub_enableEnternewpartAutomation().status,'INSTALLED');x.hub_enableEnternewpartAutomation();
- assert.deepEqual(made,['hub_processEnternewpartAutomation']);assert.equal(props.get('HUB_ENP_AUTOMATION_ENABLED'),'true');
+ assert.equal(triggers.filter(y=>y.getHandlerFunction()==='hub_enternewpartScheduledRun').length,1);
+ assert(triggers.some(y=>y.getHandlerFunction()==='unrelated'));assert(!triggers.some(y=>y.getHandlerFunction()==='hub_processEnternewpartAutomation'));
+ assert(props.has('HUB_ENP_NEXT_RUN_AT'));assert.equal(props.get('HUB_ENP_AUTOMATION_ENABLED'),'true');
  x.hub_pauseEnternewpartAutomation();assert.equal(props.get('HUB_ENP_AUTOMATION_ENABLED'),'false');
 });
+test('old five-minute callbacks automatically migrate without business writes',()=>{
+ const x=ctx();let migrated=0;x.hub_enternewpartScheduledRun=()=>{migrated++;return {status:'MIGRATED'}};
+ assert.equal(x.hub_processEnternewpartAutomation({triggerUid:'old'}).status,'MIGRATED');assert.equal(migrated,1);
+});
+test('scheduled callback rearms before work and skips stale or missing due times',()=>{
+ for(const delta of [null,2*60*60*1000,5*60*1000]){
+  const x=ctx(),events=[];x.PropertiesService={getScriptProperties:()=>({getProperty:k=>k==='HUB_ENP_NEXT_RUN_AT'&&delta!==null?new Date(Date.now()-delta).toISOString():null})};
+  x.hub_scheduleNextEnternewpartRun_=()=>{events.push('rearm');return {};};
+  x.hub_row2LegacyEngine_=()=>({enp_hubRunEligibleRows_:()=>{events.push('work');return {status:'COMPLETE'}}});
+  x.hub_enternewpartScheduledRun();assert.equal(events[0],'rearm');assert.equal(events.includes('work'),delta===5*60*1000);
+ }
+});
+
 
 
 function genericExecute(opts={}) {

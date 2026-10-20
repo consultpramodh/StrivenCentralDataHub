@@ -45,7 +45,7 @@ const external=[...new Set(analysis.globalScope.through.map(r=>r.identifier.name
 const allow=new Set(['Array','Boolean','Date','Error','JSON','LockService','Logger','Map','Math','Number','Object','PropertiesService','RegExp','ScriptApp','Set','SpreadsheetApp','String','UrlFetchApp','Utilities','console','isFinite','isNaN','parseFloat','parseInt','undefined','hub_strivenAccessToken_']);
 assert.deepEqual(external.filter(n=>!allow.has(n)),[],'Undefined external helpers');
 let hub=currentHub;
-const replaceNames=new Set(['hub_row2LegacyEngine_','enp_runHubRow2CreateAndReplace','hub_previewRow2CreateAndReplace','hub_recoverItemGroupMasterBridgeWatchdog','hub_previewEnternewpartAutomation','hub_processEnternewpartAutomation','hub_enableEnternewpartAutomation','hub_pauseEnternewpartAutomation']);
+const replaceNames=new Set(['hub_row2LegacyEngine_','enp_runHubRow2CreateAndReplace','hub_previewRow2CreateAndReplace','hub_recoverItemGroupMasterBridgeWatchdog','hub_previewEnternewpartAutomation','hub_processEnternewpartAutomation','hub_enableEnternewpartAutomation','hub_pauseEnternewpartAutomation','hub_enternewpartScheduledRun','hub_nextEnternewpartRun_','hub_scheduleNextEnternewpartRun_']);
 for(const node of hubAst.body.filter(n=>n.type==='FunctionDeclaration'&&replaceNames.has(n.id.name)).sort((a,b)=>b.start-a.start)){
  hub=hub.slice(0,node.start)+hub.slice(node.end);
 }
