@@ -1,0 +1,132 @@
+{
+  "nativeFormulaChecks": [
+    {
+      "case": "40% discount",
+      "calculated": 60,
+      "effective": 60,
+      "status": "CALCULATED — verified supplier inputs",
+      "pass": true
+    },
+    {
+      "case": "0% discount",
+      "calculated": 100,
+      "effective": 100,
+      "status": "CALCULATED — verified supplier inputs",
+      "pass": true
+    },
+    {
+      "case": "100% discount",
+      "calculated": 0,
+      "effective": 0,
+      "status": "CALCULATED — verified supplier inputs",
+      "pass": true
+    },
+    {
+      "case": "missing list",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — supplier list price missing",
+      "pass": true
+    },
+    {
+      "case": "discount entered as 40",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — invalid price or discount",
+      "pass": true
+    },
+    {
+      "case": "negative discount",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — invalid price or discount",
+      "pass": true
+    },
+    {
+      "case": "negative list",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — invalid price or discount",
+      "pass": true
+    },
+    {
+      "case": "currency mismatch",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — currency missing or mismatched",
+      "pass": true
+    },
+    {
+      "case": "missing currency",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — currency missing or mismatched",
+      "pass": true
+    },
+    {
+      "case": "unverified price",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — supplier price not verified",
+      "pass": true
+    },
+    {
+      "case": "missing evidence",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — supplier price source missing",
+      "pass": true
+    },
+    {
+      "case": "preserve existing cost",
+      "calculated": 60,
+      "effective": 25,
+      "status": "REVIEW — calculated cost differs; existing retained",
+      "pass": true
+    },
+    {
+      "case": "preserve existing zero",
+      "calculated": 60,
+      "effective": 0,
+      "status": "REVIEW — calculated cost differs; existing retained",
+      "pass": true
+    },
+    {
+      "case": "round cents",
+      "calculated": 0.34,
+      "effective": 0.34,
+      "status": "CALCULATED — verified supplier inputs",
+      "pass": true
+    },
+    {
+      "case": "numeric text not accepted",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — invalid price or discount",
+      "pass": true
+    },
+    {
+      "case": "missing discount",
+      "calculated": "",
+      "effective": "",
+      "status": "BLOCKED — applicable discount missing",
+      "pass": true
+    }
+  ],
+  "nativeFallbackWrapperResults": [
+    60,
+    25,
+    0
+  ],
+  "liveVerification": {
+    "records": 65,
+    "statuses": {
+      "BLOCKED — supplier list price missing": 17,
+      "EXISTING COST — preserved": 7,
+      "REVIEW — existing cost is zero": 41
+    },
+    "changedOriginalValues": 0,
+    "formulaErrors": 0,
+    "nativeTestCases": 16
+  }
+}
