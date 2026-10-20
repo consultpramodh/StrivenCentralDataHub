@@ -29,4 +29,6 @@ jobs:
         run: |
           mkdir -p RUN
           printf '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8"}' > RUN/.clasp.json
-          clasp run hub_processItemLookups --project RUN
+          set -euo pipefail
+          clasp run hub_processItemLookups --project RUN | tee lookup-execution.txt
+          node -e 'const fs=require("fs"); const output=fs.readFileSync("lookup-execution.txt","utf8"); if(!output.trim() || /unable to run|permission|not deployed|not found|script function.*failed/i.test(output)) { process.stderr.write("Apps Script execution did not complete successfully.\\n"); process.exit(1); }'
