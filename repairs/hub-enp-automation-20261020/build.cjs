@@ -11,11 +11,20 @@ function ingest(source,file,override=false){
   }
  }
 }
-for(const f of fs.readdirSync(legacyDir).filter(f=>f.endsWith('.js')).sort())ingest(fs.readFileSync(path.join(legacyDir,f),'utf8'),f);
+const currentHub=fs.readFileSync(hubFile,'utf8'),hubAst=acorn.parse(currentHub,{ecmaVersion:2022,ranges:true});
+const currentFactory=hubAst.body.find(n=>n.type==='FunctionDeclaration'&&n.id.name==='hub_row2LegacyEngine_');
+assert(currentFactory,'Current native Hub engine missing');
+const engineCode=currentFactory.body.body.filter(n=>n.type!=='ReturnStatement').map(n=>currentHub.slice(n.start,n.end)).join('\n');
+ingest(engineCode,'current-Hub-engine.js');
+const baseline=fs.readFileSync(path.join(__dirname,'PRE/native-overrides.js'),'utf8');
+for(const node of acorn.parse(baseline,{ecmaVersion:2022}).body.filter(n=>n.type==='FunctionDeclaration')){
+ const name=node.id.name;assert(defs.has(name),'Missing deployed native helper '+name);
+ assert.equal(defs.get(name).code,baseline.slice(node.start,node.end),'Deployed native helper drift: '+name);
+}
 ingest(fs.readFileSync(overridesFile,'utf8'),'hub-native-overrides.js',true);
 const hydrate=defs.get('enp_legacyHydrateReferences_');assert(hydrate);
 hydrate.code=hydrate.code.replace("if(Number(base.ItemType&&base.ItemType.Id)!==enp_guardHubReference_(registry,'ItemType','Inventory').Id)","if(base.ItemType && Number(base.ItemType.Id)!==enp_guardHubReference_(registry,'ItemType','Inventory').Id)");
-hydrate.code=hydrate.code.replace("registry.BaseCurrency='CAD';","base.ItemType=enp_guardHubReference_(registry,'ItemType','Inventory');\n  registry.BaseCurrency='CAD';");
+if(!hydrate.code.includes('base.ItemType=enp_guardHubReference_'))hydrate.code=hydrate.code.replace("registry.BaseCurrency='CAD';","base.ItemType=enp_guardHubReference_(registry,'ItemType','Inventory');\n  registry.BaseCurrency='CAD';");
 hydrate.node=acorn.parse(hydrate.code,{ecmaVersion:2022,ranges:true});
 const watchdog=defs.get('enp_scheduleItemGroupBridgeWatchdog_');assert(watchdog);watchdog.code=watchdog.code.replace("'enp_recoverItemGroupMasterBridgeWatchdog'","'hub_recoverItemGroupMasterBridgeWatchdog'");
 watchdog.node=acorn.parse(watchdog.code,{ecmaVersion:2022,ranges:true});
@@ -35,10 +44,12 @@ const ast=acorn.parse(factory,{ecmaVersion:2022,ranges:true}),analysis=scope.ana
 const external=[...new Set(analysis.globalScope.through.map(r=>r.identifier.name))].sort();
 const allow=new Set(['Array','Boolean','Date','Error','JSON','LockService','Logger','Map','Math','Number','Object','PropertiesService','RegExp','ScriptApp','Set','SpreadsheetApp','String','UrlFetchApp','Utilities','console','isFinite','isNaN','parseFloat','parseInt','undefined','hub_strivenAccessToken_']);
 assert.deepEqual(external.filter(n=>!allow.has(n)),[],'Undefined external helpers');
-let hub=fs.readFileSync(hubFile,'utf8');assert(!hub.includes('function hub_row2LegacyEngine_'),'already bundled');
-assert(hub.includes(".addItem('Process Shared Item Lookups','hub_processItemLookups')"));
-hub=hub.replace(".addItem('Process Shared Item Lookups','hub_processItemLookups')",
-".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')\n    .addItem('Create/reuse + replace ENTERNEWPART row 2','enp_runHubRow2CreateAndReplace')\n    .addSeparator()\n    .addItem('Process Shared Item Lookups','hub_processItemLookups')");
+let hub=currentHub;
+const replaceNames=new Set(['hub_row2LegacyEngine_','enp_runHubRow2CreateAndReplace','hub_previewRow2CreateAndReplace','hub_recoverItemGroupMasterBridgeWatchdog']);
+for(const node of hubAst.body.filter(n=>n.type==='FunctionDeclaration'&&replaceNames.has(n.id.name)).sort((a,b)=>b.start-a.start)){
+ hub=hub.slice(0,node.start)+hub.slice(node.end);
+}
+assert(hub.includes(".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')"));
 hub=hub.replace(".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')",".addItem('Preview all ENTERNEWPART rows','hub_previewEnternewpartAutomation')\n    .addItem('Enable ENTERNEWPART automation','hub_enableEnternewpartAutomation')\n    .addItem('Pause ENTERNEWPART automation','hub_pauseEnternewpartAutomation')\n    .addItem('Process eligible ENTERNEWPART rows now','hub_processEnternewpartAutomation')\n    .addSeparator()\n    .addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')");
 hub+='\n/* Google Apps Script — Central Hub native legacy execution with authorized multi-row automation. */\n'+
 "function enp_runHubRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_runHubRow2CreateAndReplace(); }\n"+

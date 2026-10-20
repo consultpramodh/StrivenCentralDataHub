@@ -33,19 +33,9 @@ jobs:
             mkdir -p "$D/src"
             printf '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$D/.clasp.json"
           done
-          mkdir -p LEGACY/src
-          printf '{"scriptId":"1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj","rootDir":"src"}' > LEGACY/.clasp.json
-          clasp pull --project LEGACY
-          cmp LEGACY/src/03_enternewpart_sync_and_actions.js repairs/enp-legacy-execution-20261020/ENP/03_enternewpart_sync_and_actions.js
-          cmp LEGACY/src/98_enp_item_resolution_guard.js repairs/enp-legacy-execution-20261020/ENP/98_enp_item_resolution_guard.js
-          cmp LEGACY/src/02_striven_core.js repairs/enp-description-20261020/ENP/02_striven_core.js
-          node repairs/enp-parity-20261020/test.cjs LEGACY/src
-          node repairs/enp-legacy-execution-20261020/test.cjs LEGACY/src
           clasp pull --project PRE
-          node repairs/hub-row2-execution-20261020/build.cjs LEGACY/src repairs/hub-row2-execution-20261020/PRE/10_Central_Hub.js repairs/hub-row2-location-20261020/native-overrides.js EXPECTED_HUB.js
-          cmp PRE/src/10_Central_Hub.js EXPECTED_HUB.js
           cp -a PRE/src/. WORK/src/
-          node repairs/hub-enp-automation-20261020/build.cjs LEGACY/src repairs/hub-row2-execution-20261020/PRE/10_Central_Hub.js repairs/hub-enp-automation-20261020/native-overrides.js WORK/src/10_Central_Hub.js
+          node repairs/hub-enp-automation-20261020/build.cjs PRE/src PRE/src/10_Central_Hub.js repairs/hub-enp-automation-20261020/native-overrides.js WORK/src/10_Central_Hub.js
           mv WORK/src/10_Central_Hub.js.receipt.json BUNDLE_RECEIPT.json
           node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
           node repairs/hub-enp-automation-20261020/test.cjs WORK/src
@@ -80,3 +70,5 @@ jobs:
             BUNDLE_RECEIPT.json
           retention-days: 30
 # Build revision 2: avoid CommonJS reserved binding.
+
+# Build revision 3: preserve current Hub engine; do not import changed legacy project.
