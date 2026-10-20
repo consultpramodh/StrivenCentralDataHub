@@ -113,7 +113,7 @@ test('preview includes all rows without API calls or writes',()=>{
  const records=[gen({'Workflow Status':'COMPLETED'}),gen({'Create Authorized':false}),gen({'Item Number':'OTHER','Item Name':'Other (OTHER)','Manufacturer Part#':'OTHER','Original Description':'Item Number: OTHER\nItem Name: Other\nPrice: $3'})];
  const h=Object.keys(records[0]),g=[h,...records.map(r=>h.map(k=>r[k]))];
  c.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>g})})});
- const p=c.enp_hubPreviewAllRows_();assert.equal(p.rows,3);assert.equal(p.completed,1);assert.equal(p.unauthorized,1);assert.equal(p.eligible,1);assert.equal(p.strivenCalls,0);assert.equal(p.writes,0);
+ const p=c.enp_hubPreviewAllRows_();assert.equal(p.rows,3);assert.equal(p.completed,1);assert.equal(p.unauthorized,0);assert.equal(p.eligible,2);assert.equal(p.strivenCalls,0);assert.equal(p.writes,0);
 });
 function autoRun(opts={}) {
  const x=ctx(),data=new Map(Object.entries(opts.props||{})),events=[];x.Utilities=util();
@@ -126,14 +126,14 @@ function autoRun(opts={}) {
  return {x,data,events,run:()=>x.enp_hubRunEligibleRows_()};
 }
 test('worker is disabled or paused without API calls',()=>{
- for(const props of [{},{HUB_ENP_AUTOMATION_ENABLED:'true',HUB_ENP_PAUSE_UNTIL:String(Date.now()+90000)}]){
+ for(const props of [{HUB_ENP_AUTOMATION_ENABLED:'false'},{HUB_ENP_AUTOMATION_ENABLED:'true',HUB_ENP_PAUSE_UNTIL:String(Date.now()+90000)}]){
  const a=autoRun({props});assert.equal(a.run().processed,0);assert.equal(a.events.length,0);}
 });
 test('worker processes at most two rows and removes its lease',()=>{
  const a=autoRun({props:{HUB_ENP_AUTOMATION_ENABLED:'true'}}),r=a.run();assert.equal(r.processed,2);assert.equal(a.events.filter(x=>x[0]==='execute').length,2);assert(!a.data.has('HUB_ENP_WORKER_LEASE'));
 });
-test('worker skips completed and unauthorized rows',()=>{
- const a=autoRun({props:{HUB_ENP_AUTOMATION_ENABLED:'true'},rows:[gen({'Workflow Status':'COMPLETED'}),gen({'Create Authorized':false})]});assert.equal(a.run().processed,0);assert(!a.events.some(x=>x[0]==='execute'));
+test('worker skips completed and explicitly held rows',()=>{
+ const a=autoRun({props:{HUB_ENP_AUTOMATION_ENABLED:'true'},rows:[gen({'Workflow Status':'COMPLETED'}),gen({'Create Authorized':false,'Workflow Status':'HOLD'})]});assert.equal(a.run().processed,0);assert(!a.events.some(x=>x[0]==='execute'));
 });
 test('worker lease prevents concurrent execution',()=>{
  const a=autoRun({props:{HUB_ENP_AUTOMATION_ENABLED:'true',HUB_ENP_WORKER_LEASE:JSON.stringify({token:'other',until:Date.now()+90000})}});assert.equal(a.run().status,'BUSY');assert.equal(a.events.length,0);
@@ -199,6 +199,47 @@ test('preview ignores unused rows containing FALSE checkboxes',()=>{
  const g=grid(gen({'Workflow Status':'COMPLETED'})),empty=g[0].map(()=>''),idx=g[0].indexOf('Create Authorized');empty[idx]=false;g.push(empty);
  c.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>g})})});
  const p=c.enp_hubPreviewAllRows_();assert.equal(p.rows,1);assert.equal(p.completed,1);assert.equal(p.unauthorized,0);
+});
+
+
+test('standing policy validates Approved, Quoted and Manual without legacy checkboxes',()=>{
+ for(const r of [gen({'Create Authorized':false}),gen({Source:'Quoted','Create Authorized':false,'Quoted Authorization':false}),gen({Source:'Manual','Create Authorized':false,'SO Internal ID':'','Sales Order Number':'',Quantity:'','SO Line Price':''})]){
+ const g=grid(r),p=c.enp_hubAutomaticPlan_(g,2);assert.equal(p.autoValidated,true);assert.equal(p.record['Create Authorized'],true);
+ if(r.Source==='Quoted')assert.equal(p.record['Quoted Authorization'],true);
+ assert.equal(g[1][g[0].indexOf('Create Authorized')],false);assert.equal(p.fingerprint,c.enp_hubFingerprint_(r));
+ }
+});
+test('automatic policy retains hold and data validation barriers',()=>{
+ for(const change of [{'Workflow Status':'HOLD'},{'Workflow Status':'PAUSED'},{'Workflow Status':'DO NOT CREATE'},{Cost:''},{'Manufacturer Part#':'bad'},{'Serial Number Tracking':'YES'},{'MAP Price':0},{'Original Description':'unidentified'}]){
+ assert.throws(()=>c.enp_hubAutomaticPlan_(grid(gen({'Create Authorized':false,...change})),2));
+ }
+});
+test('worker processes valid unchecked rows without first enabling a flag',()=>{
+ const a=autoRun({rows:[gen({'Create Authorized':false})]});assert.equal(a.run().processed,1);assert(a.events.some(e=>e[0]==='execute'));
+});
+test('worker ignores empty FALSE checkbox rows and reviews invalid unchecked rows',()=>{
+ const r=gen({'Create Authorized':false,Cost:''}),blank=Object.fromEntries(Object.keys(r).map(h=>[h,h==='Create Authorized'?false:'']));
+ const a=autoRun({rows:[r,blank]});assert.equal(a.run().processed,0);assert(!a.events.some(e=>e[0]==='execute'));
+ assert(a.events.some(e=>e[0]==='status'&&e[1]==='NEEDS REVIEW'));
+});
+
+
+test('automatic payload context permits legacy FALSE flags after full validation',()=>{
+ const x=ctx(),r=gen({Source:'Quoted','Create Authorized':false,'Quoted Authorization':false}),g=grid(r);x.Utilities=util();
+ x.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>g})})});
+ const refs={BaseCurrency:'CAD',LegacyUntrackedItemNumbers:[r['Item Number']]};
+ for(const [field,name,id] of [['ItemType','Inventory',901],['DefaultInventoryLocation',r['Location Name'],902],['Category',r['Item Category'],903],['PreferredVendor',r['Preferred Vendor'],904],['Manufacturer',r.Manufacturer,905]])refs[field]=[{Id:id,Name:name,Verified:true,Evidence:'synthetic live item'}];
+ x.PropertiesService={getScriptProperties:()=>({getProperty:()=>JSON.stringify(refs)})};
+ x.testPlan=x.enp_hubAutomaticPlan_(g,2);vm.runInContext('ENP_HUB_ACTIVE_PLAN=testPlan',x);
+ const out=x.enp_guardBuildHubCreatePayload_({ItemNumber:r['Item Number'],Name:r['Item Name']});assert.equal(out.ItemNumber,r['Item Number']);assert.equal(out.Cost,r.Cost);
+ g[1][g[0].indexOf('Cost')]=99;assert.throws(()=>x.enp_guardBuildHubCreatePayload_({ItemNumber:r['Item Number'],Name:r['Item Name']}),/row changed/);
+});
+test('automatic payload context never authorizes a different SKU',()=>{
+ const x=ctx(),r=gen({'Create Authorized':false}),g=grid(r);x.Utilities=util();
+ x.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>g})})});
+ x.PropertiesService={getScriptProperties:()=>({getProperty:()=>null})};
+ x.testPlan=x.enp_hubAutomaticPlan_(g,2);vm.runInContext('ENP_HUB_ACTIVE_PLAN=testPlan',x);
+ assert.throws(()=>x.enp_guardBuildHubCreatePayload_({ItemNumber:'OTHER',Name:'Other'}),/Item Number mismatch/);
 });
 
 assert.equal(network,0);console.log(JSON.stringify({checks,externalNetworkAttempts:network}));

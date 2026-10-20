@@ -263,6 +263,7 @@ function enp_guardBuildHubCreatePayload_(base) {
  const plan=ENP_HUB_ACTIVE_PLAN,sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART');
  enp_hubAssertCurrent_(sheet,plan);
  const r=Object.assign({},enp_hubRowRecord_(sheet.getDataRange().getValues(),plan.rowNumber).record,{'Workflow Status':'READY'});
+ if(plan.autoValidated){r['Create Authorized']=true;if(plan.source==='QUOTED')r['Quoted Authorization']=true;}
  const raw=PropertiesService.getScriptProperties().getProperty('ENTERNEWPART_HUB_REFERENCE_IDS');
  const candidate=enp_guardHubPayloadFromRecord_(base,r,raw?JSON.parse(raw):{});
  if(candidate.unsupportedFields.length)throw new Error('API write path unverified: '+candidate.unsupportedFields.join(', '));
@@ -287,7 +288,7 @@ function enp_hubExecuteRow_(rowNumber) {
  const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART');
  let plan=null,itemId=null;
  try {
-  plan=enp_hubPlanRow_(sheet.getDataRange().getValues(),rowNumber);ENP_HUB_ACTIVE_PLAN=plan;
+  plan=enp_hubAutomaticPlan_(sheet.getDataRange().getValues(),rowNumber);ENP_HUB_ACTIVE_PLAN=plan;
   let target=null;
   const existing=enp_legacyExactLookupNow_(plan.record['Item Number']);
   itemId=existing?enp_guardItemId_(existing):null;
@@ -338,16 +339,16 @@ function enp_hubPreviewAllRows_() {
  for(let row=2;row<=grid.length;row++){
   const values=grid[row-1];if(!['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[h[key]]);}))continue;
   if(enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'){results.push({row:row,status:'COMPLETED'});continue;}
-  try{const plan=enp_hubPlanRow_(grid,row);results.push({row:row,status:'ELIGIBLE',itemNumber:plan.record['Item Number']});}
-  catch(e){results.push({row:row,status:values[h['Create Authorized']]===true?'REVIEW':'UNAUTHORIZED',reason:String(e.message||e)});}
+  try{const plan=enp_hubAutomaticPlan_(grid,row);results.push({row:row,status:'ELIGIBLE',itemNumber:plan.record['Item Number']});}
+  catch(e){results.push({row:row,status:enp_hubIsHeld_(values[h['Workflow Status']])?'HOLD':'REVIEW',reason:String(e.message||e)});}
  }
  return {rows:results.length,eligible:results.filter(function(r){return r.status==='ELIGIBLE';}).length,
  completed:results.filter(function(r){return r.status==='COMPLETED';}).length,
- unauthorized:results.filter(function(r){return r.status==='UNAUTHORIZED';}).length,results:results,strivenCalls:0,writes:0};
+ unauthorized:0,review:results.filter(function(r){return r.status==='REVIEW';}).length,held:results.filter(function(r){return r.status==='HOLD';}).length,results:results,strivenCalls:0,writes:0};
 }
 function enp_hubRunEligibleRows_() {
  const props=PropertiesService.getScriptProperties(),started=Date.now(),pause=Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0);
- if(props.getProperty('HUB_ENP_AUTOMATION_ENABLED')!=='true')return {status:'DISABLED',processed:0};
+ if(props.getProperty('HUB_ENP_AUTOMATION_ENABLED')==='false')return {status:'DISABLED',processed:0};
  if(pause>started)return {status:'COOLDOWN',processed:0};
  const gate=LockService.getScriptLock();if(!gate.tryLock(1000))return {status:'BUSY',processed:0};
  const token=String(started)+'-'+Utilities.getUuid(),lease='HUB_ENP_WORKER_LEASE';
@@ -359,8 +360,8 @@ function enp_hubRunEligibleRows_() {
  try{
   const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),h=enp_indexByHeader_(grid[0]);
   for(let row=2;row<=grid.length&&results.length<2&&Date.now()-started<180000;row++){
-   const values=grid[row-1];if(values[h['Create Authorized']]!==true||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED')continue;
-   let plan;try{plan=enp_hubPlanRow_(grid,row);}catch(e){
+   const values=grid[row-1];if(!enp_hubHasData_(values,h)||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'||enp_hubIsHeld_(values[h['Workflow Status']]))continue;
+   let plan;try{plan=enp_hubAutomaticPlan_(grid,row);}catch(e){
     const reason=String(e.message||e);
     if(values[h['Workflow Status']]!=='NEEDS REVIEW'||values[h['Review Reason']]!==reason){
      sheet.getRange(row,h['Workflow Status']+1).setValue('NEEDS REVIEW');
@@ -379,4 +380,26 @@ function enp_hubRunEligibleRows_() {
  }finally{
   const current=props.getProperty(lease);if(current&&JSON.parse(current).token===token)props.deleteProperty(lease);
  }
+}
+
+/* Google Apps Script — standing authorization for validated rows.
+ * The user requested automatic processing; legacy checkbox flags are not gates.
+ * Explicit HOLD/PAUSED and global pause remain authoritative.
+ */
+function enp_hubIsHeld_(status) {
+ return ['HOLD','PAUSED','DO NOT CREATE'].indexOf(enp_guardUpper_(status))>=0;
+}
+function enp_hubHasData_(values,col) {
+ return ['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[col[key]]);});
+}
+function enp_hubAutomaticPlan_(grid,rowNumber) {
+ const mapped=enp_hubRowRecord_(grid,rowNumber),r=mapped.record;
+ if(enp_hubIsHeld_(r['Workflow Status']))throw new Error('Row is explicitly on HOLD');
+ const candidate=grid.slice(),row=grid[rowNumber-1].slice();
+ row[mapped.col['Create Authorized']]=true;
+ if(enp_guardUpper_(r.Source)==='QUOTED')row[mapped.col['Quoted Authorization']]=true;
+ candidate[rowNumber-1]=row;
+ const plan=enp_hubPlanRow_(candidate,rowNumber);
+ plan.autoValidated=true;plan.fingerprint=enp_hubFingerprint_(r);
+ return plan;
 }

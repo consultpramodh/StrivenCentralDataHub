@@ -45,12 +45,12 @@ const external=[...new Set(analysis.globalScope.through.map(r=>r.identifier.name
 const allow=new Set(['Array','Boolean','Date','Error','JSON','LockService','Logger','Map','Math','Number','Object','PropertiesService','RegExp','ScriptApp','Set','SpreadsheetApp','String','UrlFetchApp','Utilities','console','isFinite','isNaN','parseFloat','parseInt','undefined','hub_strivenAccessToken_']);
 assert.deepEqual(external.filter(n=>!allow.has(n)),[],'Undefined external helpers');
 let hub=currentHub;
-const replaceNames=new Set(['hub_row2LegacyEngine_','enp_runHubRow2CreateAndReplace','hub_previewRow2CreateAndReplace','hub_recoverItemGroupMasterBridgeWatchdog']);
+const replaceNames=new Set(['hub_row2LegacyEngine_','enp_runHubRow2CreateAndReplace','hub_previewRow2CreateAndReplace','hub_recoverItemGroupMasterBridgeWatchdog','hub_previewEnternewpartAutomation','hub_processEnternewpartAutomation','hub_enableEnternewpartAutomation','hub_pauseEnternewpartAutomation']);
 for(const node of hubAst.body.filter(n=>n.type==='FunctionDeclaration'&&replaceNames.has(n.id.name)).sort((a,b)=>b.start-a.start)){
  hub=hub.slice(0,node.start)+hub.slice(node.end);
 }
 assert(hub.includes(".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')"));
-hub=hub.replace(".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')",".addItem('Preview all ENTERNEWPART rows','hub_previewEnternewpartAutomation')\n    .addItem('Enable ENTERNEWPART automation','hub_enableEnternewpartAutomation')\n    .addItem('Pause ENTERNEWPART automation','hub_pauseEnternewpartAutomation')\n    .addItem('Process eligible ENTERNEWPART rows now','hub_processEnternewpartAutomation')\n    .addSeparator()\n    .addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')");
+if(!hub.includes(".addItem('Preview all ENTERNEWPART rows'"))hub=hub.replace(".addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')",".addItem('Preview all ENTERNEWPART rows','hub_previewEnternewpartAutomation')\n    .addItem('Enable ENTERNEWPART automation','hub_enableEnternewpartAutomation')\n    .addItem('Pause ENTERNEWPART automation','hub_pauseEnternewpartAutomation')\n    .addItem('Process eligible ENTERNEWPART rows now','hub_processEnternewpartAutomation')\n    .addSeparator()\n    .addItem('Preview ENTERNEWPART row 2','hub_previewRow2CreateAndReplace')");
 hub+='\n/* Google Apps Script — Central Hub native legacy execution with authorized multi-row automation. */\n'+
 "function enp_runHubRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_runHubRow2CreateAndReplace(); }\n"+
 "function hub_previewRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_previewHubRow2CreateAndReplace(); }\n"+
