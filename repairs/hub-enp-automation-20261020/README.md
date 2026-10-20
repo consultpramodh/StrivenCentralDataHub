@@ -1,21 +1,13 @@
-# Authorized multi-row ENTERNEWPART automation
+# Central Hub automatic ENTERNEWPART processing
 
-Central Hub menu: Preview all ENTERNEWPART rows; Enable ENTERNEWPART automation; Pause ENTERNEWPART automation; Process eligible ENTERNEWPART rows now. Direct installer: `hub_enableEnternewpartAutomation`. Worker: `hub_processEnternewpartAutomation`.
+Daily schedule: **08:00, 10:00, 12:00, 14:00, 16:00 and 18:00 America/Toronto**. No overnight slots. Toronto daylight-saving changes are handled. Each scheduled callback creates and verifies the next one-shot timer before business work; stale callbacks more than one hour late do not process rows. At most two rows are processed per run (up to 12 rows per day).
 
-The installer creates one 5-minute trigger for this worker and sets a Hub enable flag. It does not authorize rows or install item refresh/report triggers. A separate pause action stops business processing without deleting unrelated triggers. Installing the trigger requires one authorized run in the bound Hub project because remote execution is not available.
+The user's standing instruction authorizes fully validated Approved, Quoted and Manual rows automatically. The automatic worker does not require the legacy Create Authorized or Quoted Authorization checkboxes. Explicit HOLD, PAUSED and DO NOT CREATE row statuses prevent execution. Global pause remains available. Completed rows are skipped; missing/invalid data, identity/duplicate conflicts and unsupported serial YES/MAP stay for review.
 
-Rows require boolean Create Authorized. Quoted rows additionally require boolean Quoted Authorization and matching live Quoted status. Approved rows require matching live Approved status. Manual rows with no SO create/reuse a catalog item only. Completed rows are skipped. Catalog values, identity, exact raw SO SKU, quantity, separate SO line price, currency, fixed fields, textual UPC and duplicate-SKU consistency are checked. Incomplete/conflicting rows stay for review. Serial YES and nonblank MAP remain blocked because API write support has not been verified.
+Processing retains exact live item lookup, create/reuse guards, verified metadata reference IDs, saved item IDs, separate catalog and SO line prices, SO quantity preservation, CF820 verification and recovery journals. No metadata IDs or costs are guessed.
 
-Every eligible row uses live exact lookup, verified reference IDs, guarded create/reuse, item ID capture, readback, and the legacy SO replacement engine with CF820 verification. Catalog price and SO line price remain separate. Existing Hub GL defaults are retained. No credentials, reference IDs, or missing metadata are guessed.
+An existing five-minute callback migrates to the new schedule on its next tick. The installer replaces only ENTERNEWPART worker timers and preserves unrelated triggers. Manual process/preview controls remain available, but routine processing requires no manual runs. Activation has not been verified through this connection: the latest remote installation attempt was rejected by Google execution permissions. Source deployment is distinct from timer installation.
 
-Each run processes at most two rows with a three-minute start budget, a five-minute lease to prevent competing workers, a one-second interval between Striven requests, 90-second cooldown after HTTP429, ten-minute per-row retry delay and at most three attempts for unchanged inputs. Changing reviewed business inputs resets the attempt state. Existing item IDs and uncertain-create parking survive failure. The exact worker trigger is idempotent; other triggers remain untouched.
+Latest verified deployment: https://github.com/consultpramodh/StrivenCentralDataHub/actions/runs/39473388544
 
-Deployment fresh-pulls and backs up the full Hub, verifies the deployed native helper baseline, builds from the working Hub engine, changes only the existing Hub source file, verifies the full pulled-back project, and rolls back on failure. A separately changed legacy project is not imported or modified. Deployment itself neither installs triggers nor executes item/SO mutations. Generated full source and dependency receipt are retained in GitHub Actions artifacts.
-
-## Verified deployment
-
-- Multi-row deployment: https://github.com/consultpramodh/StrivenCentralDataHub/actions/runs/39470729744 — success.
-- Blank-checkbox preview repair: https://github.com/consultpramodh/StrivenCentralDataHub/actions/runs/39470962344 — success.
-- Final source passed 34 native boundary/integration groups plus 31 response-envelope cases before and after push; tests made zero external network calls. All 8 Hub source files were pulled back and compared; full backups and SHA-256 records are in the run artifacts.
-- Live Sheet read: 65 source rows, 1 COMPLETED, 64 not authorized, 0 authorized incomplete rows. Blank checkbox-only rows are excluded from preview counts.
-- The installer has not been invoked by this deployment. Run `hub_enableEnternewpartAutomation` once in the Hub to create the dedicated 5-minute trigger. Production processing and timer installation are distinct from source deployment.
+All 44 native validation/integration groups plus 31 response-envelope cases passed before and after deployment. Full Hub backup and SHA-256 records were retained; all 8 source files were pulled back and compared. The one-file update preserved the independent legacy project.
