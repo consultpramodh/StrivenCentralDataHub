@@ -1,0 +1,76 @@
+name: Deploy shared item resolver
+on:
+  push:
+    branches: [main]
+    paths: ['repairs/item-resolution-20261020/**', '.github/workflows/deploy-item-resolver.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Behavior and syntax tests
+        run: |
+          node --check repairs/item-resolution-20261020/HUB/10_Central_Hub.js
+          node --check repairs/item-resolution-20261020/ENP/98_enp_item_resolution_guard.js
+          node repairs/item-resolution-20261020/test.cjs
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Back up, patch only two files, and verify same projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          for P in HUB ENP; do
+            mkdir -p PRE/$P/src WORK/$P/src FRESH/$P/src POST/$P/src
+            if [ "$P" = HUB ]; then ID='1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8'; else ID='1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj'; fi
+            for D in PRE WORK FRESH POST; do printf '{"scriptId":"%s","rootDir":"src"}' "$ID" > "$D/$P/.clasp.json"; done
+            clasp pull --project PRE/$P
+            cp -a PRE/$P/src/. WORK/$P/src/
+          done
+          echo 'b2c78a39041b5d0adc21ba7808e8cbd2c70d9aa45256cef82600ec741082d627  PRE/HUB/src/10_Central_Hub.js' | sha256sum -c -
+          echo 'e26b60e07784f1f4a900c7250e4870b7686d3980450b99c9ffd6ec9356acb169  PRE/ENP/src/98_enp_item_resolution_guard.js' | sha256sum -c -
+          cp repairs/item-resolution-20261020/HUB/10_Central_Hub.js WORK/HUB/src/10_Central_Hub.js
+          cp repairs/item-resolution-20261020/ENP/98_enp_item_resolution_guard.js WORK/ENP/src/98_enp_item_resolution_guard.js
+          for P in HUB ENP; do clasp pull --project FRESH/$P; diff -qr PRE/$P/src FRESH/$P/src; done
+          HUB_PUSHED=0
+          ENP_PUSHED=0
+          rollback() {
+            trap - ERR
+            if [ "$ENP_PUSHED" = 1 ]; then clasp push --force --project PRE/ENP; fi
+            if [ "$HUB_PUSHED" = 1 ]; then clasp push --force --project PRE/HUB; fi
+            exit 1
+          }
+          trap rollback ERR
+          HUB_PUSHED=1
+          clasp push --force --project WORK/HUB
+          clasp pull --project POST/HUB
+          diff -qr WORK/HUB/src POST/HUB/src
+          ENP_PUSHED=1
+          clasp push --force --project WORK/ENP
+          clasp pull --project POST/ENP
+          diff -qr WORK/ENP/src POST/ENP/src
+          find POST -name '*.js' -exec sha256sum {} + > POST_SHA256.txt
+          echo 'Both same-project source comparisons PASS. No Striven writes or pipeline executions performed.'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shared-item-resolver-pre-post
+          path: |
+            PRE
+            POST
+            POST_SHA256.txt
+          retention-days: 14
