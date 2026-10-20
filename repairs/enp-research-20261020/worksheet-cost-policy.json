@@ -1,0 +1,18 @@
+{
+  "platform": "Google Sheets",
+  "policy": "Existing Price times one minus verified applicable vendor discount. Missing discount is not zero. Existing positive catalog cost is retained and differences are flagged. Exact SKU required for calculation. This changes worksheet calculations only; it does not enable item creation or deploy Apps Script.",
+  "formulas": {
+    "AP2": "=ARRAYFORMULA(IF(LEN($B2:$B500&$R2:$R500&$AF2:$AF500)=0,\"\",IFERROR(IF(($B2:$B500<>\"\")*ISNUMBER($D2:$D500)*($D2:$D500>=0)*ISNUMBER($AD2:$AD500)*($AD2:$AD500>=0)*($AD2:$AD500<=1),ROUND($D2:$D500*(1-$AD2:$AD500),2),\"\"),\"\")))",
+    "AQ2": "=ARRAYFORMULA(IF(LEN($B2:$B500&$R2:$R500&$AF2:$AF500)=0,\"\",IF($AP2:$AP500<>\"\",IF($E2:$E500=$AP2:$AP500,\"CALCULATED — existing Price × (1 − applicable discount)\",\"REVIEW — calculated cost differs; positive catalog cost retained\"),IF($E2:$E500<>\"\",IF($E2:$E500=0,\"REVIEW — zero catalog cost; verified inputs missing\",\"EXISTING COST — preserved\"),IF($B2:$B500=\"\",\"BLOCKED — exact SKU missing\",IF($D2:$D500=\"\",\"BLOCKED — price missing\",\"BLOCKED — applicable discount missing or invalid\"))))))",
+    "E2": "=LET(sourceCost,LET(key,UPPER(TRIM(TO_TEXT($B2))),keys,ARRAYFORMULA(UPPER(TRIM(TO_TEXT(INDEX(DATA_ITEMS!$A$2:$Z,0,MATCH(\"ItemNumber\",DATA_ITEMS!$A$1:$Z$1,0)))))),vals,INDEX(DATA_ITEMS!$A$2:$Z,0,MATCH(\"Cost\",DATA_ITEMS!$A$1:$Z$1,0)),hits,SUMPRODUCT(--(keys=key)),IF(key=\"\",\"\",IF(hits=1,LET(v,INDEX(vals,MATCH(key,keys,0)),IF(LEN(TO_TEXT(v))=0,\"\",v)),\"\"))),IF(AND(ISNUMBER(sourceCost),sourceCost>0),sourceCost,IF($AP2=\"\",sourceCost,$AP2)))"
+  },
+  "validation": {
+    "nativeFormulaCases": 6,
+    "nativeFormulaCasesPassed": 6,
+    "calculationRowsRecomputedIndependently": 33,
+    "finalFormulaErrors": 0,
+    "positiveCatalogCostsPreserved": 8,
+    "existingSalesOrderLinksPreserved": 61
+  },
+  "remaining": "Striven exact live lookup queue and reference verification remain unresolved. Research enrichment is worksheet-only; no Striven item or order writes performed."
+}
