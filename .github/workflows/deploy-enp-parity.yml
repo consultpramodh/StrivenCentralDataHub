@@ -1,0 +1,84 @@
+name: Deploy ENTERNEWPART parity safeguards
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/deploy-enp-parity.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull full backup and validate exact baseline
+        run: |
+          set -euo pipefail
+          for D in PRE WORK FRESH POST; do
+            mkdir -p "$D/src"
+            printf '%s' '{"scriptId":"1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj","rootDir":"src"}' > "$D/.clasp.json"
+          done
+          clasp pull --project PRE
+          node - <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),assert=require('assert');
+          const root='repairs/enp-parity-20261020/';
+          const expected=JSON.parse(fs.readFileSync(root+'PRE_SHA256.json'));
+          for(const [file,hash] of Object.entries(expected)) {
+            const live=fs.readFileSync('PRE/src/'+file);
+            assert.equal(crypto.createHash('sha256').update(live).digest('hex'),hash,'Live baseline drift: '+file);
+            assert(live.equals(fs.readFileSync(root+'PRE/'+file)),'Permanent backup mismatch: '+file);
+          }
+          NODE
+          cp -a PRE/src/. WORK/src/
+          cp repairs/enp-parity-20261020/ENP/*.js WORK/src/
+          node repairs/enp-parity-20261020/test.cjs WORK/src > TEST_RESULTS.txt
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enp-parity-full-pre
+          path: PRE
+          retention-days: 30
+      - name: Push same project and verify every source file
+        shell: bash
+        run: |
+          set -euo pipefail
+          rollback() {
+            trap - ERR
+            clasp push --force --project PRE
+            clasp pull --project POST
+            diff -qr PRE/src POST/src
+            exit 1
+          }
+          trap rollback ERR
+          clasp push --force --project WORK
+          clasp pull --project POST
+          diff -qr WORK/src POST/src
+          node repairs/enp-parity-20261020/test.cjs POST/src > POST_TEST_RESULTS.txt
+          find POST/src -type f -exec sha256sum {} + > POST_SHA256.txt
+          echo 'PASS: same project, three changed files, full POST comparison, no pipeline execution.'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: enp-parity-pre-post-verification
+          path: |
+            PRE
+            POST
+            TEST_RESULTS.txt
+            POST_TEST_RESULTS.txt
+            POST_SHA256.txt
+          retention-days: 30
