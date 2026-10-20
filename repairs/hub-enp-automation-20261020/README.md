@@ -10,4 +10,12 @@ Every eligible row uses live exact lookup, verified reference IDs, guarded creat
 
 Each run processes at most two rows with a three-minute start budget, a five-minute lease to prevent competing workers, a one-second interval between Striven requests, 90-second cooldown after HTTP429, ten-minute per-row retry delay and at most three attempts for unchanged inputs. Changing reviewed business inputs resets the attempt state. Existing item IDs and uncertain-create parking survive failure. The exact worker trigger is idempotent; other triggers remain untouched.
 
-Deployment fresh-pulls and backs up all sources, reconstructs the previous generated Hub for an exact baseline comparison, changes only the existing Hub source file, verifies the full pulled-back project, and rolls back on failure. Deployment itself neither installs triggers nor executes item/SO mutations. Generated full source and dependency receipt are retained in GitHub Actions artifacts.
+Deployment fresh-pulls and backs up the full Hub, verifies the deployed native helper baseline, builds from the working Hub engine, changes only the existing Hub source file, verifies the full pulled-back project, and rolls back on failure. A separately changed legacy project is not imported or modified. Deployment itself neither installs triggers nor executes item/SO mutations. Generated full source and dependency receipt are retained in GitHub Actions artifacts.
+
+## Verified deployment
+
+- Multi-row deployment: https://github.com/consultpramodh/StrivenCentralDataHub/actions/runs/39470729744 — success.
+- Blank-checkbox preview repair: https://github.com/consultpramodh/StrivenCentralDataHub/actions/runs/39470962344 — success.
+- Final source passed 34 native boundary/integration groups plus 31 response-envelope cases before and after push; tests made zero external network calls. All 8 Hub source files were pulled back and compared; full backups and SHA-256 records are in the run artifacts.
+- Live Sheet read: 65 source rows, 1 COMPLETED, 64 not authorized, 0 authorized incomplete rows. Blank checkbox-only rows are excluded from preview counts.
+- The installer has not been invoked by this deployment. Run `hub_enableEnternewpartAutomation` once in the Hub to create the dedicated 5-minute trigger. Production processing and timer installation are distinct from source deployment.
