@@ -1,0 +1,65 @@
+name: Repair Hub item search response handling
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/deploy-enp-search-envelope.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull and verify current source before patching
+        run: |
+          set -euo pipefail
+          for D in PRE WORK FRESH POST; do
+            mkdir -p "$D/src"
+            printf '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$D/.clasp.json"
+          done
+          clasp pull --project PRE
+          cmp PRE/src/10_Central_Hub.js repairs/enp-search-envelope-20261020/PRE/10_Central_Hub.js
+          cp -a PRE/src/. WORK/src/
+          cp repairs/enp-search-envelope-20261020/HUB/10_Central_Hub.js WORK/src/10_Central_Hub.js
+          node repairs/enp-search-envelope-20261020/test.cjs WORK/src/10_Central_Hub.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enp-search-envelope-full-pre
+          path: PRE
+          retention-days: 30
+      - name: Patch same project and verify complete source
+        run: |
+          set -euo pipefail
+          rollback() { trap - ERR; clasp push --force --project PRE; exit 1; }
+          trap rollback ERR
+          clasp push --force --project WORK
+          clasp pull --project POST
+          diff -qr WORK/src POST/src
+          node repairs/enp-search-envelope-20261020/test.cjs POST/src/10_Central_Hub.js
+          find POST -type f -exec sha256sum {} + > POST_SHA256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: enp-search-envelope-pre-post
+          path: |
+            PRE
+            POST
+            POST_SHA256.txt
+          retention-days: 30
