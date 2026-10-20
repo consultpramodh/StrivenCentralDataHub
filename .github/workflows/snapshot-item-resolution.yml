@@ -37,3 +37,5 @@ jobs:
             SNAPSHOT
             SOURCE_SHA256.txt
           retention-days: 14
+
+# Read-only rules and custom-field parity audit requested 2026-10-20 11:38 America/Toronto.
