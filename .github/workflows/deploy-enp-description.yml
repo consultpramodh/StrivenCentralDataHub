@@ -1,0 +1,96 @@
+name: Deploy ENTERNEWPART description validation
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/deploy-enp-description.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          test -n "$CLASPRC_JSON"
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+      - name: Pull, back up and test full current projects
+        run: |
+          set -euo pipefail
+          for P in HUB ENP; do
+            if [ "$P" = HUB ]; then ID='1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8'; else ID='1VbXsIFdiO_2Uo2wW_K6Dc64EFkp0x4POzs8yOuL-GjaaeeSOJy-iprPj'; fi
+            for D in PRE WORK FRESH POST; do
+              mkdir -p "$D/$P/src"
+              printf '{"scriptId":"%s","rootDir":"src"}' "$ID" > "$D/$P/.clasp.json"
+            done
+            clasp pull --project PRE/$P
+            cp -a PRE/$P/src/. WORK/$P/src/
+          done
+          node - <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),assert=require('assert'),root='repairs/enp-description-20261020/';
+          for(const [file,hash] of Object.entries(JSON.parse(fs.readFileSync(root+'PRE_SHA256.json')))){
+            const parts=file.split('/'),p=parts[0],name=parts[1],live=fs.readFileSync('PRE/'+p+'/src/'+name);
+            assert.equal(crypto.createHash('sha256').update(live).digest('hex'),hash,'Baseline drift '+file);
+            assert(live.equals(fs.readFileSync(root+'PRE/'+file)),'Permanent backup mismatch '+file);
+          }
+          NODE
+          cp repairs/enp-description-20261020/HUB/*.js WORK/HUB/src/
+          cp repairs/enp-description-20261020/ENP/*.js WORK/ENP/src/
+          node repairs/enp-description-20261020/test.cjs > PARSER_TESTS.txt
+          node repairs/enp-description-20261020/test-projects.cjs WORK/ENP/src WORK/HUB/src/10_Central_Hub.js > PROJECT_TESTS.txt
+          node repairs/enp-parity-20261020/test.cjs WORK/ENP/src > PARITY_TESTS.txt
+          for P in HUB ENP; do clasp pull --project FRESH/$P; diff -qr PRE/$P/src FRESH/$P/src; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enp-description-full-pre
+          path: PRE
+          retention-days: 30
+      - name: Patch same projects and verify complete sources
+        run: |
+          set -euo pipefail
+          HUB_PUSHED=0
+          ENP_PUSHED=0
+          rollback() {
+            trap - ERR
+            if [ "$ENP_PUSHED" = 1 ]; then clasp push --force --project PRE/ENP; fi
+            if [ "$HUB_PUSHED" = 1 ]; then clasp push --force --project PRE/HUB; fi
+            exit 1
+          }
+          trap rollback ERR
+          HUB_PUSHED=1
+          clasp push --force --project WORK/HUB
+          clasp pull --project POST/HUB
+          diff -qr WORK/HUB/src POST/HUB/src
+          ENP_PUSHED=1
+          clasp push --force --project WORK/ENP
+          clasp pull --project POST/ENP
+          diff -qr WORK/ENP/src POST/ENP/src
+          node repairs/enp-description-20261020/test-projects.cjs POST/ENP/src POST/HUB/src/10_Central_Hub.js > POST_PROJECT_TESTS.txt
+          node repairs/enp-parity-20261020/test.cjs POST/ENP/src > POST_PARITY_TESTS.txt
+          find POST -type f -exec sha256sum {} + > POST_SHA256.txt
+          echo 'PASS: both same-project full-source comparisons and post-source tests; no pipeline execution.'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: enp-description-pre-post
+          path: |
+            PRE
+            POST
+            PARSER_TESTS.txt
+            PROJECT_TESTS.txt
+            PARITY_TESTS.txt
+            POST_PROJECT_TESTS.txt
+            POST_PARITY_TESTS.txt
+            POST_SHA256.txt
+          retention-days: 30
