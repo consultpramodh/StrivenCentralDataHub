@@ -6,11 +6,11 @@ function enp_legacyHydrateReferences_(record,base) {
   const grid=sheet.getDataRange().getValues(),c=enp_indexByHeader_(grid[0]),ids=[],evidence={};
   Object.keys(fields).forEach(function(field){
     evidence[field]={};const pair=fields[field],col=c[pair[2]];
-    if(col==null||c.Id==null)throw new Error('HUB_METADATA_BLOCKED: DATA_ITEMS missing '+pair[2]);
+    if(col==null||c.Id==null||c.ItemNumber==null)throw new Error('HUB_METADATA_BLOCKED: DATA_ITEMS missing '+pair[2]);
     let n=0;const seen={};
     for(const row of grid.slice(1)){
       const id=Number(row[c.Id]);
-      if(enp_guardUpper_(row[col])!==enp_guardUpper_(pair[1])||!Number.isSafeInteger(id)||id<=0||seen[id])continue;
+      if(!enp_guardUpper_(row[c.ItemNumber])||enp_guardUpper_(row[col])!==enp_guardUpper_(pair[1])||!Number.isSafeInteger(id)||id<=0||seen[id])continue;
       seen[id]=true;if(ids.indexOf(id)<0)ids.push(id);if(++n>=6)break;
     }
   });
