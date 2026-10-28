@@ -1,0 +1,87 @@
+name: Read-only ENTERNEWPART report probe
+on:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Back up live project and prepare temporary read-only probe
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH VERIFY; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          cp -a PRE/src/. WORK/src/
+          cat >> WORK/src/ENTERNEWPART.js <<'JS'
+
+          function hub_enpReportReadOnlyProbe() {
+            const props=PropertiesService.getScriptProperties();
+            return ['STRIVEN_ENTERNEWPART_REPORT_API','STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'].map(function(key){
+              const url=props.getProperty(key);
+              if(!url)return {key:key,status:'PROPERTY_MISSING'};
+              try{
+                const parsed=String(url);
+                if(!/^https:\/\//i.test(parsed)) return {key:key,status:'NON_HTTPS'};
+                const response=UrlFetchApp.fetch(parsed,{method:'get',muteHttpExceptions:true,followRedirects:false});
+                const code=response.getResponseCode();
+                if(code!==200)return {key:key,status:'HTTP_ERROR',httpCode:code};
+                const body=JSON.parse(response.getContentText());
+                const candidates=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
+                if(candidates.length!==1)return {key:key,status:'UNKNOWN_ENVELOPE',topLevelKeys:Object.keys(body||{}).slice(0,30)};
+                const rows=candidates[0],fields=rows.length&&rows[0]&&typeof rows[0]==='object'?Object.keys(rows[0]):[];
+                return {key:key,status:'OK',count:rows.length,fields:fields};
+              }catch(e){return {key:key,status:'FETCH_OR_PARSE_ERROR',errorType:String(e.name||'Error')};}
+            });
+          }
+          JS
+          node --check WORK/src/ENTERNEWPART.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enp-report-probe-pre
+          path: PRE/src/
+          retention-days: 30
+      - name: Probe report configuration and restore original source
+        run: |
+          set -euo pipefail
+          restore() {
+            trap - EXIT
+            clasp push --force --project PRE
+            clasp pull --project VERIFY
+            diff -qr PRE/src VERIFY/src
+          }
+          trap restore EXIT
+          clasp push --force --project WORK
+          clasp run hub_enpReportReadOnlyProbe --project WORK | tee report-probe.txt
+          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed' report-probe.txt; then exit 1; fi
+          grep -q 'STRIVEN_ENTERNEWPART_REPORT_API' report-probe.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: enp-report-probe-results
+          path: report-probe.txt
+          retention-days: 7
+          if-no-files-found: warn
