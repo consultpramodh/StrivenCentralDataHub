@@ -48,7 +48,7 @@ jobs:
               const so=e.enp_getSalesOrder_(28164),lines=e.enp_getSalesOrderLineItems_(so);
               const target=e.enp_findTargetPlaceholderLine_(lines,{desiredItemNumber:sku,desiredQty:Number(v('Quantity')),newItemId:item?e.enp_guardItemId_(item):null});
               const missing=['Cost','Item Category','Preferred Vendor','Manufacturer'].filter(k=>v(k)===''||v(k)==null);
-              return {status:'CHECKED',itemFound:!!item,itemId:item?e.enp_guardItemId_(item):null,lineFound:!!target,lineId:target?(target.id||target.Id):null,missingFields:missing,soStatus:v('SO Status'),soLinePrice:v('SO Line Price'),strivenWrites:0};
+              return {status:'CHECKED',itemFound:!!item,itemId:item?e.enp_guardItemId_(item):null,lineFound:!!target,lineId:target?(target.id||target.Id):null,missingFields:missing,soStatus:v('SO Status'),soLinePrice:v('SO Line Price'),soCurrency:so.currency||so.Currency||null,soCurrencyId:so.currencyId||so.CurrencyId||null,referenceKeys:Object.keys(JSON.parse(PropertiesService.getScriptProperties().getProperty('ENTERNEWPART_HUB_REFERENCE_IDS')||'{}')),strivenWrites:0};
             }catch(err){return {status:'BLOCKED',reason:String(err.message||err).slice(0,300),strivenWrites:0};}
           }
           JS
