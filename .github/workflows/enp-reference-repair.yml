@@ -1,0 +1,86 @@
+name: Guarded ENTERNEWPART reference verification repair
+on:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-reference-repair.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Hub authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Pull and test minimal patch
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH POST; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          printf '%s\n' '3faed79575e957757a9b5a9434e46945e0a71bb7c93b37485186fde37f7e458d  PRE/src/ENTERNEWPART.js' | sha256sum -c -
+          cp -a PRE/src/. WORK/src/
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('WORK/src/ENTERNEWPART.js')
+          s=p.read_text()
+          a=s.index('function enp_legacyHydrateReferences_(record,base) {')
+          b=s.index('function enp_legacyAssertHubRow2Unchanged_',a)
+          replacement=Path('repairs/enternewpart-reference-20261028/reference-hydration.js').read_text()
+          p.write_text(s[:a]+replacement+'\n'+s[b:])
+          PY
+          printf '%s\n' '2634fad4609b5c85cca78296b7a29da112b989d706003201a6873fd670aa8fa9  WORK/src/ENTERNEWPART.js' | sha256sum -c -
+          for f in WORK/src/*.js; do node --check "$f"; done
+          node repairs/enternewpart-reference-20261028/test.cjs WORK/src/ENTERNEWPART.js
+          node repairs/hub-enp-automation-20261020/test.cjs WORK/src
+          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
+          clasp run hub_previewEnternewpartAutomation --project PRE > preview-pre.txt 2>&1
+          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed|error' preview-pre.txt; then exit 1; fi
+          grep -q 'eligible' preview-pre.txt
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - name: Back up exact project
+        uses: actions/upload-artifact@v4
+        with:
+          name: enp-reference-pre
+          path: PRE/src/
+          retention-days: 30
+      - name: Push and verify entire project
+        run: |
+          set -euo pipefail
+          rollback() { trap - ERR; clasp push --force --project PRE; exit 1; }
+          trap rollback ERR
+          clasp push --force --project WORK
+          clasp pull --project POST
+          diff -qr WORK/src POST/src
+          clasp run hub_previewEnternewpartAutomation --project POST > preview-post.txt 2>&1
+          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed|error' preview-post.txt; then exit 1; fi
+          grep -q 'eligible' preview-post.txt
+          trap - ERR
+          echo 'ENP_REFERENCE_PATCH_VERIFIED'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: enp-reference-post
+          path: |
+            POST/src/
+            preview-pre.txt
+            preview-post.txt
+          retention-days: 30
+          if-no-files-found: warn
