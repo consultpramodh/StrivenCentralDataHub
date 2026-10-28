@@ -38,19 +38,24 @@ jobs:
 
           function hub_enpReportReadOnlyProbe() {
             const e=hub_row2LegacyEngine_(),out=[];
-            try {
-              const it=e.enp_legacyLiveItem_(43467);
-              const rawCost=it.cost!==undefined?it.cost:it.Cost;
-              out.push({type:'item',id:e.enp_guardItemId_(it),number:e.enp_guardItemNumber_(it),price:e.enp_guardItemPrice_(it),costPresent:rawCost!==undefined&&rawCost!==null,cost:rawCost===undefined?null:rawCost});
-            }catch(err){out.push({type:'item',status:'ERROR',reason:String(err.message||err).slice(0,250)});}
-            for(const spec of [[28132,143249],[28125,0]]){
+            for(const path of ['/Help/Api/POST-v1-items','/Help/Api/PUT-v1-items-id','/Help/Api/POST-v1-Items']){
               try {
-                const so=e.enp_getSalesOrder_(spec[0]),lines=e.enp_getSalesOrderLineItems_(so);
-                const found=lines.filter(l=>e.enp_lineDescriptionMatchesExactItemNumber_(String(l.description||l.Description||''),'SPAPLENUM-4'));
-                out.push({type:'order',id:spec[0],lines:JSON.stringify(found.map(l=>({id:l.id||l.Id,itemId:(l.item||l.Item||{}).id||(l.item||l.Item||{}).Id,qty:l.qty||l.Qty,price:l.price!==undefined?l.price:l.Price})))});
-              }catch(err){out.push({type:'order',id:spec[0],status:'ERROR',reason:String(err.message||err).slice(0,250)});}
+                const res=UrlFetchApp.fetch('https://api.striven.com'+path,{muteHttpExceptions:true});
+                const text=res.getContentText().replace(/<[^>]*>/g,' ').replace(/\\s+/g,' ');
+                out.push({path:path,code:res.getResponseCode(),text:text.slice(0,1000)});
+              }catch(err){out.push({path:path,error:String(err.message||err).slice(0,200)});}
             }
-            return {status:'PLENUM_VERIFY_FINISHED',results:out};
+            try{
+              const m=e.enp_getStrivenItemById_(42686,{});
+              const children=m.groupItems||m.GroupItems||[];
+              for(const id of [28132,28125]){
+                const so=e.enp_getSalesOrder_(id),lines=e.enp_getSalesOrderLineItems_(so);
+                const groups=lines.filter(l=>Number((l.item||l.Item||{}).id||(l.item||l.Item||{}).Id)===42686);
+                out.push({order:id,groupCount:groups.length,masterChildren:children.length,orderChildren:groups.map(g=>(g.itemGroupLineItems||g.ItemGroupLineItems||[]).length).join(','),
+                same:groups.map(g=>e.enp_itemGroupDefinitionSignature_(g.itemGroupLineItems||g.ItemGroupLineItems||[])===e.enp_itemGroupDefinitionSignature_(children)).join(',')});
+              }
+            }catch(err){out.push({group:'ERROR',reason:String(err.message||err).slice(0,300)});}
+            return {status:'BRIDGE_READONLY_CHECK',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
