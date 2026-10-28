@@ -1,4 +1,4 @@
-name: ENTERNEWPART guarded report execution
+name: ENTERNEWPART report diagnostics
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -37,31 +37,21 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
-            const engine=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
-            const expected=[[68,'UKA 37/95/37/57','28139'],[69,'1044264FBV','28132'],[70,'SPAPLENUM-4','28132'],[71,'1044264FBV','28125'],[72,'SPAPLENUM-4','28125'],[73,'71540','28010']];
-            const key='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid(),out=[];
-            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
-            try{
-              const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
-              p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
-            }finally{gate.releaseLock();}
-            try{
-              for(const spec of expected){
-                const grid=sh.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
-                if(String(v('Item Number')).trim().toUpperCase()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});continue;}
-                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});continue;}
-                try{
-                  engine.enp_hubAutomaticPlan_(grid,spec[0]);
-                  const result=engine.enp_hubExecuteRow_(spec[0]);
-                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
-                }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,350)});}
-              }
-              return {status:'REPORT_BATCH_FINISHED',results:out};
-            }finally{
-              const raw=p.getProperty(key);
-              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
+            const e=hub_row2LegacyEngine_(),out=[];
+            for(const id of [28139,28132,28125,28010]){
+              try {
+                const so=e.enp_getSalesOrder_(id), c=so.currency||so.Currency||{}, status=so.status||so.Status||{};
+                out.push({order:id,currency:c.currencyISOCode||c.CurrencyISOCode||null,status:status.name||status.Name||null});
+              }catch(x){out.push({order:id,error:String(x.message||x).slice(0,200)});}
             }
+            for(const id of [33494,23303,23338]){
+              try {
+                const item=e.enp_legacyLiveItem_(id), matches={};
+                Object.keys(item).filter(k=>/serial|track|cost/i.test(k)).forEach(k=>matches[k]=item[k]);
+                out.push({item:id,trackingAndCost:matches});
+              }catch(x){out.push({item:id,error:String(x.message||x).slice(0,200)});}
+            }
+            return {status:'REPORT_DIAGNOSTIC_FINISHED',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
