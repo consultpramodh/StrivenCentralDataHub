@@ -1,4 +1,4 @@
-name: ENTERNEWPART one-row create and replace test
+name: ENTERNEWPART guarded candidate processing
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -37,20 +37,31 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const sheet=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART');
-            const h=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0];
-            const row=sheet.getRange(67,1,1,h.length).getValues()[0],v=k=>row[h.indexOf(k)];
-            if(String(v('Item Number')).trim()!=='N010-1083-SER'||String(v('SO Internal ID')).trim()!=='28164'||v('Workflow Status')!=='HOLD'||Number(v('Cost'))!==136||Number(v('Discount'))!==0.5||Number(v('SO Line Price'))!==272)
-              return {status:'ROW_CHANGED_STOPPED'};
-            const props=PropertiesService.getScriptProperties();
-            const lease=props.getProperty('HUB_ENP_WORKER_LEASE');
-            if(lease){try{if(JSON.parse(lease).until>Date.now())return {status:'WORKER_BUSY_STOPPED'};}catch(e){return {status:'WORKER_LEASE_INVALID'};}}
-            sheet.getRange(67,h.indexOf('Workflow Status')+1).setValue('NEEDS REVIEW');
-            SpreadsheetApp.flush();
+            const sheet=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),engine=hub_row2LegacyEngine_();
+            const expected=[[3,'PRPRD2','27391'],[11,'PVW47','23829'],[18,'482-917','23283'],[28,'SF-32-K','23174'],[29,'CVR36','23174'],[30,'GG-20R','23174'],[31,'4BVK','23141']];
+            const p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
+            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
+            const leaseKey='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid();
+            try{
+              const old=p.getProperty(leaseKey);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
+              p.setProperty(leaseKey,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
+            }finally{gate.releaseLock();}
+            const out=[];
             try {
-              return hub_row2LegacyEngine_().enp_hubExecuteRow_(67);
-            } catch(err) {
-              return {status:'BLOCKED',reason:String(err.message||err).slice(0,600)};
+              expected.forEach(function(spec){
+                const grid=sheet.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
+                if(String(v('Item Number')).trim()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});return;}
+                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});return;}
+                try{engine.enp_hubAutomaticPlan_(grid,spec[0]);}catch(e){out.push({row:spec[0],status:'REVIEW',reason:String(e.message||e).slice(0,250)});return;}
+                try{
+                  const result=engine.enp_hubExecuteRow_(spec[0]);
+                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
+                }catch(e){out.push({row:spec[0],status:'BLOCKED',reason:String(e.message||e).slice(0,400)});}
+              });
+              return {status:'BATCH_TEST_FINISHED',results:out};
+            }finally{
+              const raw=p.getProperty(leaseKey);
+              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(leaseKey);
             }
           }
           JS
