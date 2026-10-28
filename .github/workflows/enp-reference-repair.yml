@@ -36,7 +36,7 @@ jobs:
           clasp pull --project PRE
           test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "2810880e95165d66348dc92d9b177816f06d7fb2"
           cp -a PRE/src/. WORK/src/
-          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "2ec12356ab60ffcd08b4ad634e7de079bb22ac32"
+          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "94956af0ce09a9fcc32dea0c4170feb04531b089"
           cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
           for f in WORK/src/*.js; do node --check "$f"; done
           node repairs/enternewpart-reference-20261028/test.cjs WORK/src/ENTERNEWPART.js
