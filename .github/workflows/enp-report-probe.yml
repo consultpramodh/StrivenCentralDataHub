@@ -1,4 +1,4 @@
-name: ENTERNEWPART verify plenum and sales orders
+name: ENTERNEWPART scoped second order execution
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -34,28 +34,39 @@ jobs:
           done
           clasp pull --project PRE
           cp -a PRE/src/. WORK/src/
+          test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "2810880e95165d66348dc92d9b177816f06d7fb2"
+          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "b83aecb94c96aae8eb891e4fb7c7e45f5ee12326"
+          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
+          node repairs/hub-enp-automation-20261020/test.cjs WORK/src
+          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const e=hub_row2LegacyEngine_(),out=[];
-            for(const path of ['/Help/Api/POST-v1-items','/Help/Api/PUT-v1-items-id','/Help/Api/POST-v1-Items']){
-              try {
-                const res=UrlFetchApp.fetch('https://api.striven.com'+path,{muteHttpExceptions:true});
-                const text=res.getContentText().replace(/<[^>]*>/g,' ').replace(/\\s+/g,' ');
-                out.push({path:path,code:res.getResponseCode(),text:text.slice(0,1000)});
-              }catch(err){out.push({path:path,error:String(err.message||err).slice(0,200)});}
-            }
+            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+            const e=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
+            const key='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid();
+            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
             try{
-              const m=e.enp_getStrivenItemById_(42686,{});
-              const children=m.groupItems||m.GroupItems||[];
-              for(const id of [28132,28125]){
-                const so=e.enp_getSalesOrder_(id),lines=e.enp_getSalesOrderLineItems_(so);
-                const groups=lines.filter(l=>Number((l.item||l.Item||{}).id||(l.item||l.Item||{}).Id)===42686);
-                out.push({order:id,groupCount:groups.length,masterChildren:children.length,orderChildren:groups.map(g=>(g.itemGroupLineItems||g.ItemGroupLineItems||[]).length).join(','),
-                same:groups.map(g=>e.enp_itemGroupDefinitionSignature_(g.itemGroupLineItems||g.ItemGroupLineItems||[])===e.enp_itemGroupDefinitionSignature_(children)).join(',')});
-              }
-            }catch(err){out.push({group:'ERROR',reason:String(err.message||err).slice(0,300)});}
-            return {status:'BRIDGE_READONLY_CHECK',results:out};
+              const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
+              p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
+            }finally{gate.releaseLock();}
+            try{
+              const rowNum=72,grid=sh.getDataRange().getValues(),h=grid[0],row=grid[rowNum-1],v=k=>row[h.indexOf(k)];
+              if(String(v('Item Number')).trim()!=='SPAPLENUM-4'||String(v('SO Internal ID')).trim()!=='28125'||
+                 Number(v('Quantity'))!==1||Number(v('SO Line Price'))!==224||Number(v('Striven Item ID'))!==43467||
+                 String(v('Workflow Status')).toUpperCase()==='COMPLETED')return {status:'ROW_CHANGED'};
+              const so=e.enp_getSalesOrder_(28125),lines=e.enp_getSalesOrderLineItems_(so);
+              const plans=e.enp_prepareItemGroupMasterBridgePlans_(28125,lines,{});
+              if(plans.length)return {status:'GROUP_BRIDGE_NEEDED',groupIds:plans.map(x=>x.parentItemId).join(',')};
+              try{
+                e.enp_hubAutomaticPlan_(grid,rowNum);
+                const result=e.enp_hubExecuteRow_(rowNum);
+                return {status:'SECOND_ORDER_RESULT',result:JSON.stringify(result)};
+              }catch(err){return {status:'SECOND_ORDER_BLOCKED',reason:String(err.message||err).slice(0,700)};}
+            }finally{
+              const raw=p.getProperty(key);
+              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
+            }
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
