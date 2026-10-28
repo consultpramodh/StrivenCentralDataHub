@@ -39,6 +39,10 @@ jobs:
           print('Credential top-level keys:', sorted(p.keys()))
           for k,v in p.items():
             if isinstance(v,dict): print('Credential section', k, 'keys:', sorted(v.keys()))
+          t=p.get('tokens',{}).get('default',{})
+          print('Default authorization fields:',sorted(t.keys()))
+          for k,v in t.items():
+            if isinstance(v,dict): print('Authorization sub-section',k,'fields:',sorted(v.keys()))
           PY
       - name: Inspect Hub deployment inventory (read only)
         run: clasp deployments --project SNAPSHOT/HUB
