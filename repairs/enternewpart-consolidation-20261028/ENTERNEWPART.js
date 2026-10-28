@@ -303,7 +303,7 @@ function enp_hubPreviewAllRows_() {
  unauthorized:0,review:results.filter(function(r){return r.status==='REVIEW';}).length,held:results.filter(function(r){return r.status==='HOLD';}).length,results:results,strivenCalls:0,writes:0};
 }
 
-function enp_hubRunEligibleRows_() {
+function enp_hubRunEligibleRows_(reportRows) {
  const props=PropertiesService.getScriptProperties(),started=Date.now(),pause=Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0);
  if(props.getProperty('HUB_ENP_AUTOMATION_ENABLED')==='false')return {status:'DISABLED',processed:0};
  if(pause>started)return {status:'COOLDOWN',processed:0};
@@ -317,7 +317,8 @@ function enp_hubRunEligibleRows_() {
  try{
   const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),h=enp_indexByHeader_(grid[0]);
   for(let row=2;row<=grid.length&&results.length<2&&Date.now()-started<180000;row++){
-   const values=grid[row-1];if(!enp_hubHasData_(values,h)||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'||enp_hubIsHeld_(values[h['Workflow Status']]))continue;
+   const values=grid[row-1];if(Array.isArray(reportRows)&&reportRows.indexOf(row)<0)continue;
+   if(!enp_hubHasData_(values,h)||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'||enp_hubIsHeld_(values[h['Workflow Status']]))continue;
    let plan;try{plan=enp_hubAutomaticPlan_(grid,row);}catch(e){
     const reason=String(e.message||e);
     if(values[h['Workflow Status']]!=='NEEDS REVIEW'||values[h['Review Reason']]!==reason){
@@ -329,7 +330,7 @@ function enp_hubRunEligibleRows_() {
    if(state.fingerprint!==plan.fingerprint)state={fingerprint:plan.fingerprint,attempts:0,nextAt:0};
    if(state.attempts>=3||state.nextAt>Date.now())continue;
    state.attempts++;state.nextAt=Date.now()+10*60*1000;props.setProperty(key,JSON.stringify(state));
-   try{const result=enp_hubExecuteRow_(row);results.push(result);props.deleteProperty(key);}
+   try{const result=enp_hubExecuteRow_(row);results.push(result);props.deleteProperty(key);if(result.status==='COMPLETED'&&Array.isArray(reportRows)){try{const updated=hub_refreshEnternewpartReport();result.reportRefresh={reportRows:updated.reportRows,completedStillInReport:updated.completedStillInReport.length};}catch(refreshError){result.reportRefresh={status:'FAILED',reason:String(refreshError.message||refreshError)};break;}}}
    catch(e){state.error=String(e.message||e);props.setProperty(key,JSON.stringify(state));results.push({status:'BLOCKED',row:row,reason:state.error});}
    if(Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0)>Date.now())break;
   }
@@ -3014,10 +3015,86 @@ return {enp_runHubRow2CreateAndReplace,enp_previewHubRow2CreateAndReplace,enp_re
 function hub_previewEnternewpartAutomation() {
  const result=hub_row2LegacyEngine_().enp_hubPreviewAllRows_();Logger.log(JSON.stringify(result));return result;
 }
+
+// Refresh and reconcile the live ENTERNEWPART report without moving stored rows.
+function hub_refreshEnternewpartReport() {
+ const p=PropertiesService.getScriptProperties(),url=p.getProperty('HUB_ENP_REPORT_URL');
+ if(!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(String(url||'')))throw new Error('ENTERNEWPART report URL is not configured');
+ const cid=p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID');
+ const secret=p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET');
+ if(!cid||!secret)throw new Error('Striven credentials missing');
+ const response=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+hub_strivenAccessToken_(cid,secret).accessToken,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false});
+ if(response.getResponseCode()!==200)throw new Error('ENTERNEWPART report HTTP '+response.getResponseCode());
+ const body=JSON.parse(response.getContentText()),arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
+ if(arrays.length!==1)throw new Error('Unrecognized ENTERNEWPART report response');
+ const source=arrays[0],lock=LockService.getScriptLock();lock.waitLock(30000);
+ try {
+  const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+  if(!sh)throw new Error('ENTERNEWPART sheet missing');
+  const grid=sh.getDataRange().getValues(),headers=grid[0],idx={};
+  headers.forEach((h,i)=>{if(h){if(idx[h]!==undefined)throw new Error('Duplicate ENTERNEWPART header');idx[h]=i;}});
+  ['Item Number','Item Name','Price','Source','Sales Order Number','SO Internal ID','SO Status','Quantity','SO Line Price','Original Description','Workflow Status','Review Reason','Last Source Update','Location Name','Taxable','Item Type'].forEach(h=>{if(idx[h]===undefined)throw new Error('Missing ENTERNEWPART header '+h);});
+  const norm=x=>String(x==null?'':x).trim().replace(/\r\n?/g,'\n');
+  const numeric=x=>{const s=String(x==null?'':x).replace(/[$,\s]/g,'');return s!==''&&Number.isFinite(Number(s))?Number(s):null;};
+  const key=(id,desc,qty,price)=>JSON.stringify([norm(id),norm(desc),numeric(qty),numeric(price)]);
+  const existing=new Map(),slots=[];
+  grid.slice(1).forEach((r,i)=>{
+   if(r[idx['SO Internal ID']]&&r[idx['Original Description']]){
+    const k=key(r[idx['SO Internal ID']],r[idx['Original Description']],r[idx.Quantity],r[idx['SO Line Price']]);
+    if(existing.has(k))throw new Error('Ambiguous existing report row');
+    existing.set(k,i+2);
+   }else if(!r[idx['Item Number']]&&!r[idx.Source]&&!r[idx['Original Description']]&&!r[idx['SO Internal ID']])slots.push(i+2);
+  });
+  const seen=new Set(),todo=[];
+  source.forEach(r=>{
+   const id=norm(r.SalesOrderSalesOrderId),desc=norm(r.ItemDescription),status=norm(r.SalesOrderStatus),qty=numeric(r.Quantity),price=numeric(r.Price);
+   if(!id||!desc||!['Approved','Quoted'].includes(status)||qty===null||qty<=0||price===null||price<0)throw new Error('Invalid ENTERNEWPART report row');
+   const k=key(id,desc,qty,price);if(seen.has(k))throw new Error('Duplicate ENTERNEWPART report identity');seen.add(k);
+   todo.push({r:r,id:id,desc:desc,status:status,qty:qty,price:price,key:k});
+  });
+  const newCount=todo.filter(x=>!existing.has(x.key)).length;
+  if(newCount>slots.length)throw new Error('ENTERNEWPART has insufficient blank rows');
+  const active=[],completedStillInReport=[],safe=x=>typeof x==='string'&&/^[=+@-]/.test(x)?"'"+x:x;
+  let inserted=0;
+  todo.forEach(c=>{
+   let row=existing.get(c.key);
+   if(!row){
+    row=slots[inserted++];const parsed=hub_descParseFields_(c.desc),sku=String(parsed.itemNumber||'').trim().toUpperCase();
+    const values={'Item Number':sku,'Item Name':sku&&parsed.name?hub_descCanonicalName_(parsed.name,sku):parsed.name,'Price':parsed.price===null?'':parsed.price,
+     'Source':c.status,'Sales Order Number':c.r.SalesOrderNumber||'','SO Internal ID':c.id,'SO Status':c.status,'Quantity':c.qty,
+     'SO Line Price':c.price,'Original Description':c.desc,'Review Reason':'New report request: verify item identity and required metadata.',
+     'Last Source Update':new Date(),'Location Name':'60 - WAREHOUSE (Ajax)','Taxable':'Yes','Item Type':'Inventory'};
+    sh.getRange(row,idx['Workflow Status']+1).setValue('HOLD');
+    Object.keys(values).forEach(h=>sh.getRange(row,idx[h]+1).setValue(safe(values[h])));
+    sh.getRange(row,idx['Workflow Status']+1).setValue('NEEDS REVIEW');
+    SpreadsheetApp.flush();
+    if(norm(sh.getRange(row,idx['SO Internal ID']+1).getValue())!==c.id||norm(sh.getRange(row,idx['Original Description']+1).getValue())!==c.desc)throw new Error('ENTERNEWPART intake readback failed');
+   }
+   const rowStatus=existing.has(c.key)?norm(grid[row-1][idx['Workflow Status']]).toUpperCase():'NEEDS REVIEW';
+   if(rowStatus==='COMPLETED')completedStillInReport.push(row);else active.push(row);
+  });
+  let filter=sh.getFilter();
+  if(!filter){sh.getRange(1,1,sh.getMaxRows(),headers.length).createFilter();filter=sh.getFilter();}
+  const range=filter.getRange();
+  if(range.getRow()!==1||range.getColumn()!==1||range.getNumRows()<sh.getMaxRows()||range.getNumColumns()<headers.length)
+    throw new Error('ENTERNEWPART filter does not cover the queue');
+  const formula=active.length?'=AND($B2<>"",$Z2<>"COMPLETED",OR('+active.map(n=>'ROW()='+n).join(',')+'))':'=FALSE';
+  filter.setColumnFilterCriteria(idx['Item Number']+1,SpreadsheetApp.newFilterCriteria().whenFormulaSatisfied(formula).build());
+  SpreadsheetApp.flush();
+  return {status:'REFRESHED',reportRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport};
+ }finally{lock.releaseLock();}
+}
+function hub_runEnternewpartReportWorker_() {
+ const before=hub_refreshEnternewpartReport();
+ const result=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(before.activeRows);
+ result.reportRefresh={reportRows:before.reportRows,inserted:before.inserted,activeRows:before.activeRows.length,completedStillInReport:before.completedStillInReport.length};
+ return result;
+}
+
 function hub_processEnternewpartAutomation(event) {
  // A previously installed five-minute callback migrates itself on its next tick.
  if(event&&event.triggerUid)return hub_enternewpartScheduledRun(event);
- const result=hub_row2LegacyEngine_().enp_hubRunEligibleRows_();Logger.log(JSON.stringify(result));return result;
+ const result=hub_runEnternewpartReportWorker_();Logger.log(JSON.stringify(result));return result;
 }
 function hub_nextEnternewpartRun_(now) {
  const zone='America/Toronto',hours=[8,10,12,14,16,18],day=Utilities.formatDate(now,zone,'yyyy-MM-dd').split('-').map(Number);
@@ -3056,7 +3133,7 @@ function hub_enternewpartScheduledRun() {
  if(!Number.isFinite(due)||now.getTime()<due-1000||now.getTime()-due>60*60*1000){
   const out={status:'RESCHEDULED',processed:0,next:next};Logger.log(JSON.stringify(out));return out;
  }
- const result=hub_row2LegacyEngine_().enp_hubRunEligibleRows_();Logger.log(JSON.stringify(result));return result;
+ const result=hub_runEnternewpartReportWorker_();Logger.log(JSON.stringify(result));return result;
 }
 function hub_enableEnternewpartAutomation() {
  const props=PropertiesService.getScriptProperties(),next=hub_scheduleNextEnternewpartRun_(new Date());
