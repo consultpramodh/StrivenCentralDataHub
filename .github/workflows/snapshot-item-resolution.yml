@@ -39,3 +39,5 @@ jobs:
           retention-days: 14
 
 # Read-only rules and custom-field parity audit requested 2026-10-20 11:38 America/Toronto.
+
+# Refresh read-only baseline for ENTERNEWPART intake audit 2026-10-28.
