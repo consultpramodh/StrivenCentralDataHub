@@ -1,4 +1,4 @@
-name: ENTERNEWPART report diagnostics
+name: ENTERNEWPART scoped plenum execution
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -34,24 +34,41 @@ jobs:
           done
           clasp pull --project PRE
           cp -a PRE/src/. WORK/src/
+          test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "2810880e95165d66348dc92d9b177816f06d7fb2"
+          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "b83aecb94c96aae8eb891e4fb7c7e45f5ee12326"
+          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
+          node repairs/hub-enp-automation-20261020/test.cjs WORK/src
+          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const e=hub_row2LegacyEngine_(),out=[];
-            for(const id of [28139,28132,28125,28010]){
-              try {
-                const so=e.enp_getSalesOrder_(id), c=so.currency||so.Currency||{}, status=so.status||so.Status||{};
-                out.push({order:id,currency:c.currencyISOCode||c.CurrencyISOCode||null,status:status.name||status.Name||null});
-              }catch(x){out.push({order:id,error:String(x.message||x).slice(0,200)});}
+            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+            const e=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
+            const key='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid(),out=[];
+            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
+            try {
+              const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
+              p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
+            }finally{gate.releaseLock();}
+            try{
+              for(const spec of [[70,'28132'],[72,'28125']]){
+                const grid=sh.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
+                if(String(v('Item Number')).trim()!=='SPAPLENUM-4'||String(v('SO Internal ID')).trim()!==spec[1]||
+                   Number(v('Quantity'))!==1||Number(v('SO Line Price'))!==224||String(v('Source')).toUpperCase()!=='QUOTED'){
+                  out.push({row:spec[0],status:'ROW_CHANGED'});continue;
+                }
+                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});continue;}
+                try{
+                  e.enp_hubAutomaticPlan_(grid,spec[0]);
+                  const result=e.enp_hubExecuteRow_(spec[0]);
+                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
+                }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,400)});}
+              }
+              return {status:'SCOPED_PLENUM_FINISHED',results:out};
+            }finally{
+              const raw=p.getProperty(key);
+              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
             }
-            for(const id of [33494,23303,23338]){
-              try {
-                const item=e.enp_legacyLiveItem_(id), matches={};
-                Object.keys(item).filter(k=>/serial|track|cost/i.test(k)).forEach(k=>matches[k]=item[k]);
-                out.push({item:id,trackingAndCost:matches});
-              }catch(x){out.push({item:id,error:String(x.message||x).slice(0,200)});}
-            }
-            return {status:'REPORT_DIAGNOSTIC_FINISHED',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
