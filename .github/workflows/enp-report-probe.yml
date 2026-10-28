@@ -1,4 +1,4 @@
-name: ENTERNEWPART report-scoped run
+name: ENTERNEWPART serial response inspection
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -36,7 +36,18 @@ jobs:
           cp -a PRE/src/. WORK/src/
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
-          function hub_enpReportReadOnlyProbe() { return hub_processEnternewpartAutomation(); }
+          function hub_enpReportReadOnlyProbe() {
+            const e=hub_row2LegacyEngine_(),out=[];
+            for(const id of [33494,23303,43467]){
+              try{
+                const item=e.enp_legacyLiveItem_(id);
+                const fields=Object.keys(item).filter(k=>/serial|lot|track/i.test(k));
+                const found={};fields.forEach(k=>found[k]=item[k]);
+                out.push({id:id,trackingFields:JSON.stringify(found),fieldCount:Object.keys(item).length});
+              }catch(err){out.push({id:id,error:String(err.message||err).slice(0,150)});}
+            }
+            return {status:'SERIAL_RESPONSE_INSPECTED',results:out};
+          }
           JS
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
