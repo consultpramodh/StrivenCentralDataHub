@@ -44,6 +44,37 @@ jobs:
           for k,v in t.items():
             if isinstance(v,dict): print('Authorization sub-section',k,'fields:',sorted(v.keys()))
           PY
+      - name: Inspect API deployment and Cloud project access
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.parse, urllib.error
+          t=json.load(open(os.path.expanduser('~/.clasprc.json')))['tokens']['default']
+          body=urllib.parse.urlencode({'client_id':t['client_id'],'client_secret':t['client_secret'],'refresh_token':t['refresh_token'],'grant_type':'refresh_token'}).encode()
+          try:
+              data=json.load(urllib.request.urlopen(urllib.request.Request('https://oauth2.googleapis.com/token',data=body),timeout=20))
+              token=data['access_token']
+          except Exception as e:
+              print('TOKEN_REFRESH_FAILED', type(e).__name__)
+              raise SystemExit(1)
+          def get(url):
+              try:
+                  req=urllib.request.Request(url,headers={'Authorization':'Bearer '+token})
+                  with urllib.request.urlopen(req,timeout=20) as r: return r.status,json.load(r)
+              except urllib.error.HTTPError as e:
+                  return e.code,{}
+          status, info=get('https://oauth2.googleapis.com/tokeninfo?access_token='+urllib.parse.quote(token))
+          print('Token scope check HTTP:',status)
+          scope=info.get('scope','').split()
+          print('Apps Script scopes:',sorted(x for x in scope if 'script' in x))
+          status, project=get('https://cloudresourcemanager.googleapis.com/v1/projects/499373863884')
+          print('Cloud project metadata HTTP:',status)
+          if status==200: print('Cloud project number:',project.get('projectNumber'),'project id:',project.get('projectId'))
+          status, dep=get('https://script.googleapis.com/v1/projects/1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8/deployments')
+          print('Deployments API HTTP:',status)
+          for row in dep.get('deployments',[]):
+              print('Deployment:',row.get('deploymentConfig',{}).get('description','HEAD'), 'entrypoint types:',[x.get('entryPointType') for x in row.get('entryPoints',[])])
+          PY
       - name: Inspect Hub deployment inventory (read only)
         run: clasp deployments --project SNAPSHOT/HUB
       - uses: actions/upload-artifact@v4
