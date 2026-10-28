@@ -35,7 +35,7 @@ jobs:
           p=pathlib.Path('TARGET/src/create_newitems.js')
           s=p.read_text(errors='replace')
           for i,l in enumerate(s.splitlines(),1):
-              if re.search(r'SERIAL_TRACKING_POST_FIELD|UrlFetchApp|fetch\\(|enp_|function |/v[0-9]/items|serial|verif|readback|response|getContentText',l,re.I):
+              if re.search(r'SERIAL_TRACKING_POST_FIELD|UrlFetchApp|fetch|enp_|function |/v[0-9]/items|serial|verif|readback|response|getContentText',l,re.I):
                   if re.search(r'(token|secret|password|authorization|bearer)',l,re.I):
                       print('LINE',i,'[sensitive line withheld]')
                   else:
