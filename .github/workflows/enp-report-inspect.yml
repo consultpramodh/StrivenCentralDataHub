@@ -1,0 +1,45 @@
+name: Inspect ENTERNEWPART source report
+on:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-inspect.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch report without logging its URL or rows
+        env:
+          REPORT_URL: ${{ secrets.HUB_ENP_REPORT_URL }}
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request,urllib.error
+          u=os.environ.get('REPORT_URL','')
+          if not u.startswith('https://api.striven.com/v2/reports/'): raise SystemExit('Invalid report URL')
+          try:
+              with urllib.request.urlopen(urllib.request.Request(u,headers={'Accept':'application/json'}),timeout=35) as r:
+                  print('HTTP status:',r.status)
+                  data=json.load(r)
+          except urllib.error.HTTPError as e:
+              print('HTTP status:',e.code)
+              raise SystemExit(1)
+          if isinstance(data,list): rows=data
+          elif isinstance(data,dict):
+              print('Envelope fields:', sorted(data.keys()))
+              arrays=[data[k] for k in ('rows','Rows','data','Data','Results','results') if isinstance(data.get(k),list)]
+              if len(arrays)!=1: raise SystemExit('Unknown or ambiguous report response')
+              rows=arrays[0]
+          else: raise SystemExit('Unknown report response')
+          print('Rows:',len(rows))
+          keys=sorted(set().union(*(r.keys() for r in rows if isinstance(r,dict)))) if rows else []
+          print('Fields:',keys)
+          for key in ('SalesOrderStatus','SalesOrderSalesOrderStatus','Status'):
+              if key in keys:
+                  values={}
+                  for row in rows:
+                      val=str(row.get(key,''))
+                      values[val]=values.get(val,0)+1
+                  print('Status counts:',json.dumps(values,sort_keys=True))
+          PY
