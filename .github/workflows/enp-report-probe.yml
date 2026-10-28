@@ -32,16 +32,19 @@ jobs:
           clasp pull --project TARGET
           python3 - <<'PY'
           import pathlib,re
-          files=list(pathlib.Path('TARGET/src').rglob('*'))
-          files=[p for p in files if p.is_file()]
-          print('SOURCE_FILE_COUNT',len(files))
-          for p in files:
-              s=p.read_text(errors='replace')
-              lines=s.splitlines()
-              hits=[(i,l) for i,l in enumerate(lines,1) if re.search(r'serial|item.?import|import.?item|lot.?number',l,re.I)]
-              if hits:
-                  print('MATCH_FILE',p.name,'COUNT',len(hits))
-                  for i,l in hits[:100]:
-                      safe=re.sub(r'(["\x27\x60])(?:\\.|(?!\1).)*?\1','[STRING]',l)
-                      print('LINE',i,safe[:250])
+          p=pathlib.Path('TARGET/src/create_newitems.js')
+          s=p.read_text(errors='replace')
+          for i,l in enumerate(s.splitlines(),1):
+              if re.search(r'SERIAL_TRACKING_POST_FIELD|UrlFetchApp|fetch\\(|enp_|function |/v[0-9]/items|serial|verif|readback|response|getContentText',l,re.I):
+                  if re.search(r'(token|secret|password|authorization|bearer)',l,re.I):
+                      print('LINE',i,'[sensitive line withheld]')
+                  else:
+                      print('LINE',i,l[:220])
+          for p in pathlib.Path('TARGET/src').glob('*'):
+              if p.is_file() and re.search(r'import|csv_export',p.name,re.I):
+                  print('FILE',p.name)
+                  for i,l in enumerate(p.read_text(errors='replace').splitlines(),1):
+                      if re.search(r'function |UrlFetchApp|/v[0-9]/|import|serial',l,re.I):
+                          if re.search(r'token|secret|password|authorization|bearer',l,re.I): continue
+                          print('LINE',i,l[:180])
           PY
