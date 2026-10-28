@@ -1,4 +1,4 @@
-name: ENTERNEWPART single-row readiness test
+name: ENTERNEWPART one-row create and replace test
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -38,18 +38,20 @@ jobs:
 
           function hub_enpReportReadOnlyProbe() {
             const sheet=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART');
-            const header=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0];
-            const row=sheet.getRange(67,1,1,header.length).getValues()[0];
-            const v=k=>row[header.indexOf(k)];
-            if(String(v('Item Number')).trim()!=='N010-1083-SER'||String(v('SO Internal ID')).trim()!=='28164')return {status:'ROW_CHANGED_STOPPED'};
-            const e=hub_row2LegacyEngine_(),sku=String(v('Item Number')).trim();
+            const h=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0];
+            const row=sheet.getRange(67,1,1,h.length).getValues()[0],v=k=>row[h.indexOf(k)];
+            if(String(v('Item Number')).trim()!=='N010-1083-SER'||String(v('SO Internal ID')).trim()!=='28164'||v('Workflow Status')!=='HOLD'||Number(v('Cost'))!==136||Number(v('Discount'))!==0.5||Number(v('SO Line Price'))!==272)
+              return {status:'ROW_CHANGED_STOPPED'};
+            const props=PropertiesService.getScriptProperties();
+            const lease=props.getProperty('HUB_ENP_WORKER_LEASE');
+            if(lease){try{if(JSON.parse(lease).until>Date.now())return {status:'WORKER_BUSY_STOPPED'};}catch(e){return {status:'WORKER_LEASE_INVALID'};}}
+            sheet.getRange(67,h.indexOf('Workflow Status')+1).setValue('NEEDS REVIEW');
+            SpreadsheetApp.flush();
             try {
-              const item=e.enp_legacyExactLookupNow_(sku);
-              const so=e.enp_getSalesOrder_(28164),lines=e.enp_getSalesOrderLineItems_(so);
-              const target=e.enp_findTargetPlaceholderLine_(lines,{desiredItemNumber:sku,desiredQty:Number(v('Quantity')),newItemId:item?e.enp_guardItemId_(item):null});
-              const missing=['Cost','Item Category','Preferred Vendor','Manufacturer'].filter(k=>v(k)===''||v(k)==null);
-              return {status:'CHECKED',itemFound:!!item,itemId:item?e.enp_guardItemId_(item):null,lineFound:!!target,lineId:target?(target.id||target.Id):null,missingFields:missing,soStatus:v('SO Status'),soLinePrice:v('SO Line Price'),soCurrency:so.currency||so.Currency||null,soCurrencyId:so.currencyId||so.CurrencyId||null,referenceKeys:Object.keys(JSON.parse(PropertiesService.getScriptProperties().getProperty('ENTERNEWPART_HUB_REFERENCE_IDS')||'{}')),strivenWrites:0};
-            }catch(err){return {status:'BLOCKED',reason:String(err.message||err).slice(0,300),strivenWrites:0};}
+              return hub_row2LegacyEngine_().enp_hubExecuteRow_(67);
+            } catch(err) {
+              return {status:'BLOCKED',reason:String(err.message||err).slice(0,600)};
+            }
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
