@@ -53,7 +53,16 @@ jobs:
               const rows=arrays[0],fields=rows.length&&rows[0]&&typeof rows[0]==='object'?Object.keys(rows[0]):[];
               const statuses={};
               rows.forEach(function(r){const v=r.SalesOrderStatus||r.Status;if(v)statuses[String(v)]=(statuses[String(v)]||0)+1;});
-              return {status:'OK',count:rows.length,fields:fields,statuses:statuses};
+              const sh=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),hdr=grid[0],ix=x=>hdr.indexOf(x);
+              const norm=x=>String(x==null?'':x).trim().replace(/\r\n?/g,'\n');
+              const num=x=>Number(String(x==null?'':x).replace(/[$,\s]/g,''));
+              let matched=0,newRows=0,ambiguous=0,invalid=0;
+              rows.forEach(function(r){
+                if(!r.SalesOrderSalesOrderId||!r.ItemDescription||!['Approved','Quoted'].includes(String(r.SalesOrderStatus))){invalid++;return;}
+                const hits=grid.slice(1).filter(q=>norm(q[ix('SO Internal ID')])===norm(r.SalesOrderSalesOrderId)&&norm(q[ix('Original Description')])===norm(r.ItemDescription)&&Number(q[ix('Quantity')])===num(r.Quantity)&&Number(q[ix('SO Line Price')])===num(r.Price));
+                if(hits.length===1)matched++;else if(hits.length===0)newRows++;else ambiguous++;
+              });
+              return {status:'OK',count:rows.length,fields:fields,statuses:statuses,matched:matched,newRows:newRows,ambiguous:ambiguous,invalid:invalid};
             }catch(e){return {status:'FETCH_OR_PARSE_ERROR',errorType:String(e.name||'Error')};}
           }
           JS
