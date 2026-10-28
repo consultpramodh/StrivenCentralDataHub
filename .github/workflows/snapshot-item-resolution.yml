@@ -30,6 +30,16 @@ jobs:
           clasp pull --project SNAPSHOT/HUB
           clasp pull --project SNAPSHOT/ENP
           find SNAPSHOT -type f -exec sha256sum {} + > SOURCE_SHA256.txt
+      - name: Inspect Google authorization metadata (no secrets)
+        run: |
+          clasp show-authorized-user --json
+          python3 - <<'PY'
+          import json, os
+          p=json.load(open(os.path.expanduser('~/.clasprc.json')))
+          print('Credential top-level keys:', sorted(p.keys()))
+          for k,v in p.items():
+            if isinstance(v,dict): print('Credential section', k, 'keys:', sorted(v.keys()))
+          PY
       - name: Inspect Hub deployment inventory (read only)
         run: clasp deployments --project SNAPSHOT/HUB
       - uses: actions/upload-artifact@v4
