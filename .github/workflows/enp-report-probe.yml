@@ -1,4 +1,4 @@
-name: ENTERNEWPART new-candidate live lookup
+name: ENTERNEWPART guarded report execution
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -37,19 +37,31 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const sh=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=grid[0],e=hub_row2LegacyEngine_(),out=[];
-            const items=[[68,'UKA 37/95/37/57','28139'],[69,'1044264fbv','28132'],[70,'SPAPLENUM-4','28132'],[73,'71540','28010']];
-            for(const spec of items){
-              const row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
-              if(String(v('Item Number')).trim()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});continue;}
-              try{
-                const item=e.enp_legacyExactLookupNow_(spec[1]);
-                const so=e.enp_getSalesOrder_(Number(spec[2])),line=e.enp_findTargetPlaceholderLine_(e.enp_getSalesOrderLineItems_(so),{desiredItemNumber:spec[1],desiredQty:Number(v('Quantity')),newItemId:item?e.enp_guardItemId_(item):null});
-                const currency=so.currency||so.Currency||{};
-                out.push({row:spec[0],status:'CHECKED',found:!!item,itemId:item?e.enp_guardItemId_(item):null,lineId:line?(line.id||line.Id):null,currency:currency.currencyISOCode||currency.CurrencyISOCode||null});
-              }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,300)});}
+            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+            const engine=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
+            const expected=[[68,'UKA 37/95/37/57','28139'],[69,'1044264FBV','28132'],[70,'SPAPLENUM-4','28132'],[71,'1044264FBV','28125'],[72,'SPAPLENUM-4','28125'],[73,'71540','28010']];
+            const key='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid(),out=[];
+            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
+            try{
+              const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
+              p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
+            }finally{gate.releaseLock();}
+            try{
+              for(const spec of expected){
+                const grid=sh.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
+                if(String(v('Item Number')).trim().toUpperCase()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});continue;}
+                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});continue;}
+                try{
+                  engine.enp_hubAutomaticPlan_(grid,spec[0]);
+                  const result=engine.enp_hubExecuteRow_(spec[0]);
+                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
+                }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,350)});}
+              }
+              return {status:'REPORT_BATCH_FINISHED',results:out};
+            }finally{
+              const raw=p.getProperty(key);
+              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
             }
-            return {status:'NEW_CANDIDATES_CHECKED',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
@@ -67,6 +79,8 @@ jobs:
           set -euo pipefail
           restore() {
             trap - EXIT
+            clasp pull --project VERIFY
+            diff -qr WORK/src VERIFY/src || { echo 'Live source changed during run; refusing to overwrite'; return 1; }
             clasp push --force --project PRE
             clasp pull --project VERIFY
             diff -qr PRE/src VERIFY/src
