@@ -31,20 +31,11 @@ jobs:
           printf '%s' '{"scriptId":"1kVwKBKX8DXCmjBXs4vjIRuyMD2lwMejAZEuVjvK6Yi6YRNCmqFlP9UhG","rootDir":"src"}' > TARGET/.clasp.json
           clasp pull --project TARGET
           python3 - <<'PY'
-          import pathlib,re
-          p=pathlib.Path('TARGET/src/create_newitems.js')
-          s=p.read_text(errors='replace')
-          for i,l in enumerate(s.splitlines(),1):
-              if re.search(r'SERIAL_TRACKING_POST_FIELD|UrlFetchApp|fetch|enp_|function |/v[0-9]/items|serial|verif|readback|response|getContentText',l,re.I):
-                  if re.search(r'(token|secret|password|authorization|bearer)',l,re.I):
-                      print('LINE',i,'[sensitive line withheld]')
-                  else:
-                      print('LINE',i,l[:220])
-          for p in pathlib.Path('TARGET/src').glob('*'):
-              if p.is_file() and re.search(r'import|csv_export',p.name,re.I):
-                  print('FILE',p.name)
-                  for i,l in enumerate(p.read_text(errors='replace').splitlines(),1):
-                      if re.search(r'function |UrlFetchApp|/v[0-9]/|import|serial',l,re.I):
-                          if re.search(r'token|secret|password|authorization|bearer',l,re.I): continue
-                          print('LINE',i,l[:180])
+          import pathlib
+          lines=pathlib.Path('TARGET/src/create_newitems.js').read_text().splitlines()
+          for a,b in [(1,20),(98,132),(198,220)]:
+              for i in range(a,b+1):
+                  l=lines[i-1]
+                  if any(w in l.lower() for w in ('token','secret','password','authorization','bearer')): continue
+                  print('LINE',i,l[:200])
           PY
