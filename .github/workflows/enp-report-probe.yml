@@ -1,4 +1,4 @@
-name: Inspect Striven item 31218
+name: Inspect requested Apps Script project
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -9,11 +9,10 @@ concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  probe:
+  inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -25,61 +24,24 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up live project and prepare temporary read-only probe
+      - name: Pull and inspect source without executing it
         run: |
           set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-
-          function hub_enpReportReadOnlyProbe() {
-            const e=hub_row2LegacyEngine_(),out=[];
-            for(const id of [31218]){
-              try{
-                const item=e.enp_legacyLiveItem_(id);
-                const fields=Object.keys(item).filter(k=>/serial|lot|track/i.test(k));
-                const found={};fields.forEach(k=>found[k]=item[k]);
-                out.push({id:id,number:e.enp_guardItemNumber_(item),name:e.enp_guardItemName_(item),category:JSON.stringify(item.category||item.Category||{}),trackingFields:JSON.stringify(found),fieldCount:Object.keys(item).length});
-              }catch(err){out.push({id:id,error:String(err.message||err).slice(0,150)});}
-            }
-            return {status:'SERIAL_RESPONSE_INSPECTED',results:out};
-          }
-          JS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-      - uses: actions/upload-artifact@v4
-        with:
-          name: enp-report-probe-pre
-          path: PRE/src/
-          retention-days: 30
-      - name: Refresh queue and restore original source
-        env:
-          REPORT_URL: ${{ secrets.HUB_ENP_REPORT_URL }}
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed during run; refusing to overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          PARAMS=$(python3 -c 'import json,os; print(json.dumps([os.environ["REPORT_URL"]]))')
-          clasp run hub_enpReportReadOnlyProbe --params "$PARAMS" --project WORK | tee report-probe.txt
-          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed' report-probe.txt; then exit 1; fi
-          grep -q 'status' report-probe.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: enp-report-probe-results
-          path: report-probe.txt
-          retention-days: 7
-          if-no-files-found: warn
+          mkdir -p TARGET/src
+          printf '%s' '{"scriptId":"1kVwKBKX8DXCmjBXs4vjIRuyMD2lwMejAZEuVjvK6Yi6YRNCmqFlP9UhG","rootDir":"src"}' > TARGET/.clasp.json
+          clasp pull --project TARGET
+          python3 - <<'PY'
+          import pathlib,re
+          files=list(pathlib.Path('TARGET/src').rglob('*'))
+          files=[p for p in files if p.is_file()]
+          print('SOURCE_FILE_COUNT',len(files))
+          for p in files:
+              s=p.read_text(errors='replace')
+              lines=s.splitlines()
+              hits=[(i,l) for i,l in enumerate(lines,1) if re.search(r'serial|item.?import|import.?item|lot.?number',l,re.I)]
+              if hits:
+                  print('MATCH_FILE',p.name,'COUNT',len(hits))
+                  for i,l in hits[:100]:
+                      safe=re.sub(r'(["\x27\x60])(?:\\.|(?!\1).)*?\1','[STRING]',l)
+                      print('LINE',i,safe[:250])
+          PY
