@@ -30,6 +30,8 @@ jobs:
           clasp pull --project SNAPSHOT/HUB
           clasp pull --project SNAPSHOT/ENP
           find SNAPSHOT -type f -exec sha256sum {} + > SOURCE_SHA256.txt
+      - name: Inspect Hub deployment inventory (read only)
+        run: clasp deployments --project SNAPSHOT/HUB
       - uses: actions/upload-artifact@v4
         with:
           name: item-resolution-live-pre
