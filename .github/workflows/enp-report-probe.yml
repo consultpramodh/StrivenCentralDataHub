@@ -1,4 +1,4 @@
-name: ENTERNEWPART live report reconciliation probe
+name: ENTERNEWPART secure report configuration
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -43,13 +43,9 @@ jobs:
             if(res.getResponseCode()!==200)return {status:'REPORT_HTTP_ERROR',code:res.getResponseCode()};
             const body=JSON.parse(res.getContentText()),arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
             if(arrays.length!==1)return {status:'UNKNOWN_REPORT_ENVELOPE'};
-            const rows=arrays[0],out=[];
-            for(const r of rows){
-              const parsed=hub_descParseFields_(String(r.ItemDescription||''));
-              out.push({order:String(r.SalesOrderNumber||''),soId:String(r.SalesOrderSalesOrderId||''),sku:parsed.itemNumber,status:String(r.SalesOrderStatus||''),qty:r.Quantity,price:r.Price});
-            }
-            const matches=Object.keys(p.getProperties()).filter(k=>p.getProperty(k)===String(url));
-            return {status:'LIVE_REPORT_CHECKED',count:rows.length,items:JSON.stringify(out),matchingUrlPropertyNames:matches.join(',')};
+            p.setProperty('HUB_ENP_REPORT_URL',String(url));
+            if(p.getProperty('HUB_ENP_REPORT_URL')!==String(url))throw new Error('REPORT_CONFIGURATION_READBACK_FAILED');
+            return {status:'REPORT_CONFIGURATION_SAVED',reportRows:arrays[0].length};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
