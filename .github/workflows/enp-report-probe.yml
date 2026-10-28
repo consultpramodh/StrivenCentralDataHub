@@ -1,4 +1,4 @@
-name: ENTERNEWPART secure report configuration
+name: ENTERNEWPART report-scoped run
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -36,17 +36,7 @@ jobs:
           cp -a PRE/src/. WORK/src/
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
-          function hub_enpReportReadOnlyProbe(url) {
-            const p=PropertiesService.getScriptProperties(),cid=p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID'),secret=p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET');
-            if(!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(String(url))||!cid||!secret)return {status:'INVALID_CONFIGURATION'};
-            const res=UrlFetchApp.fetch(String(url),{method:'get',headers:{Authorization:'Bearer '+hub_strivenAccessToken_(cid,secret).accessToken,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false});
-            if(res.getResponseCode()!==200)return {status:'REPORT_HTTP_ERROR',code:res.getResponseCode()};
-            const body=JSON.parse(res.getContentText()),arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
-            if(arrays.length!==1)return {status:'UNKNOWN_REPORT_ENVELOPE'};
-            p.setProperty('HUB_ENP_REPORT_URL',String(url));
-            if(p.getProperty('HUB_ENP_REPORT_URL')!==String(url))throw new Error('REPORT_CONFIGURATION_READBACK_FAILED');
-            return {status:'REPORT_CONFIGURATION_SAVED',reportRows:arrays[0].length};
-          }
+          function hub_enpReportReadOnlyProbe() { return hub_processEnternewpartAutomation(); }
           JS
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
