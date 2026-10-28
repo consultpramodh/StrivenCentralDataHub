@@ -1,4 +1,4 @@
-name: ENTERNEWPART scoped plenum execution
+name: ENTERNEWPART verify item group recovery
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -34,41 +34,27 @@ jobs:
           done
           clasp pull --project PRE
           cp -a PRE/src/. WORK/src/
-          test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "2810880e95165d66348dc92d9b177816f06d7fb2"
-          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "b83aecb94c96aae8eb891e4fb7c7e45f5ee12326"
-          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
-          node repairs/hub-enp-automation-20261020/test.cjs WORK/src
-          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
-            const e=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
-            const key='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid(),out=[];
-            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
+            const e=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock();
+            lock.waitLock(30000);
             try {
-              const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
-              p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
-            }finally{gate.releaseLock();}
-            try{
-              for(const spec of [[70,'28132'],[72,'28125']]){
-                const grid=sh.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
-                if(String(v('Item Number')).trim()!=='SPAPLENUM-4'||String(v('SO Internal ID')).trim()!==spec[1]||
-                   Number(v('Quantity'))!==1||Number(v('SO Line Price'))!==224||String(v('Source')).toUpperCase()!=='QUOTED'){
-                  out.push({row:spec[0],status:'ROW_CHANGED'});continue;
-                }
-                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});continue;}
+              const all=p.getProperties(),prefix=e.enp_itemGroupBridgeRecoveryPrefix_();
+              const keys=Object.keys(all).filter(k=>k.indexOf(prefix)===0),out=[];
+              for(const key of keys){
+                const rec=JSON.parse(all[key]),id=Number(rec.parentItemId);
+                if(id!==42686){out.push({id:id,status:'OTHER_JOURNAL_UNTOUCHED'});continue;}
                 try{
-                  e.enp_hubAutomaticPlan_(grid,spec[0]);
-                  const result=e.enp_hubExecuteRow_(spec[0]);
-                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
-                }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,400)});}
+                  const live=e.enp_getStrivenItemById_(id,{});
+                  e.enp_verifyItemGroupMasterPayload_(live,rec.originalPayload,'Recovery compare');
+                  p.deleteProperty(key);
+                  out.push({id:id,status:'ORIGINAL_MASTER_VERIFIED_JOURNAL_CLEARED'});
+                }catch(err){out.push({id:id,status:'RECOVERY_NEEDED',reason:String(err.message||err).slice(0,500)});}
               }
-              return {status:'SCOPED_PLENUM_FINISHED',results:out};
-            }finally{
-              const raw=p.getProperty(key);
-              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
-            }
+              if(!out.length)out.push({status:'NO_RECOVERY_JOURNAL'});
+              return {status:'MASTER_RECOVERY_CHECK',results:out};
+            }finally{lock.releaseLock();}
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
