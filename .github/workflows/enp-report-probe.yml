@@ -1,4 +1,4 @@
-name: ENTERNEWPART serial response inspection
+name: Inspect Striven item 31218
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -38,12 +38,12 @@ jobs:
 
           function hub_enpReportReadOnlyProbe() {
             const e=hub_row2LegacyEngine_(),out=[];
-            for(const id of [33494,23303,43467]){
+            for(const id of [31218]){
               try{
                 const item=e.enp_legacyLiveItem_(id);
                 const fields=Object.keys(item).filter(k=>/serial|lot|track/i.test(k));
                 const found={};fields.forEach(k=>found[k]=item[k]);
-                out.push({id:id,trackingFields:JSON.stringify(found),fieldCount:Object.keys(item).length});
+                out.push({id:id,number:e.enp_guardItemNumber_(item),name:e.enp_guardItemName_(item),category:JSON.stringify(item.category||item.Category||{}),trackingFields:JSON.stringify(found),fieldCount:Object.keys(item).length});
               }catch(err){out.push({id:id,error:String(err.message||err).slice(0,150)});}
             }
             return {status:'SERIAL_RESPONSE_INSPECTED',results:out};
