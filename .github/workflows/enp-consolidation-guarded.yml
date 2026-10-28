@@ -26,6 +26,18 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Inspect credential structure without values
+        run: |
+          python3 - <<'PY'
+          import json, os
+          p=json.load(open(os.path.expanduser('~/.clasprc.json')))
+          print('Root fields:', sorted(p))
+          for k,v in p.items():
+            if isinstance(v,dict):
+              print('Section',k,'field names:',sorted(v))
+              for n,x in v.items():
+                if isinstance(x,dict): print('Profile',n,'field names:',sorted(x))
+          PY
       - name: Pull and prepare exact live project
         shell: bash
         run: |
