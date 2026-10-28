@@ -1,4 +1,4 @@
-name: ENTERNEWPART verify item group recovery
+name: ENTERNEWPART verify plenum and sales orders
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -37,24 +37,20 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const e=hub_row2LegacyEngine_(),p=PropertiesService.getScriptProperties(),lock=LockService.getScriptLock();
-            lock.waitLock(30000);
+            const e=hub_row2LegacyEngine_(),out=[];
             try {
-              const all=p.getProperties(),prefix=e.enp_itemGroupBridgeRecoveryPrefix_();
-              const keys=Object.keys(all).filter(k=>k.indexOf(prefix)===0),out=[];
-              for(const key of keys){
-                const rec=JSON.parse(all[key]),id=Number(rec.parentItemId);
-                if(id!==42686){out.push({id:id,status:'OTHER_JOURNAL_UNTOUCHED'});continue;}
-                try{
-                  const live=e.enp_getStrivenItemById_(id,{});
-                  e.enp_verifyItemGroupMasterPayload_(live,rec.originalPayload,'Recovery compare');
-                  p.deleteProperty(key);
-                  out.push({id:id,status:'ORIGINAL_MASTER_VERIFIED_JOURNAL_CLEARED'});
-                }catch(err){out.push({id:id,status:'RECOVERY_NEEDED',reason:String(err.message||err).slice(0,500)});}
-              }
-              if(!out.length)out.push({status:'NO_RECOVERY_JOURNAL'});
-              return {status:'MASTER_RECOVERY_CHECK',results:out};
-            }finally{lock.releaseLock();}
+              const it=e.enp_legacyLiveItem_(43467);
+              const rawCost=it.cost!==undefined?it.cost:it.Cost;
+              out.push({type:'item',id:e.enp_guardItemId_(it),number:e.enp_guardItemNumber_(it),price:e.enp_guardItemPrice_(it),costPresent:rawCost!==undefined&&rawCost!==null,cost:rawCost===undefined?null:rawCost});
+            }catch(err){out.push({type:'item',status:'ERROR',reason:String(err.message||err).slice(0,250)});}
+            for(const spec of [[28132,143249],[28125,0]]){
+              try {
+                const so=e.enp_getSalesOrder_(spec[0]),lines=e.enp_getSalesOrderLineItems_(so);
+                const found=lines.filter(l=>e.enp_lineDescriptionMatchesExactItemNumber_(String(l.description||l.Description||''),'SPAPLENUM-4'));
+                out.push({type:'order',id:spec[0],lines:JSON.stringify(found.map(l=>({id:l.id||l.Id,itemId:(l.item||l.Item||{}).id||(l.item||l.Item||{}).Id,qty:l.qty||l.Qty,price:l.price!==undefined?l.price:l.Price})))});
+              }catch(err){out.push({type:'order',id:spec[0],status:'ERROR',reason:String(err.message||err).slice(0,250)});}
+            }
+            return {status:'PLENUM_VERIFY_FINISHED',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
