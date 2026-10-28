@@ -34,9 +34,9 @@ jobs:
             printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
           done
           clasp pull --project PRE
-          test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "ae518d065b4b678a0e90e8ae5c4b47d9ad08c8a1"
+          test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "bcc232b9f6a6fbbe46c0e60f1adcf445b4e5aa3f"
           cp -a PRE/src/. WORK/src/
-          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "bcc232b9f6a6fbbe46c0e60f1adcf445b4e5aa3f"
+          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "b6b56256db38f9f93f9a92b3e3729ca79bbd0003"
           cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
           for f in WORK/src/*.js; do node --check "$f"; done
           node repairs/enternewpart-reference-20261028/test.cjs WORK/src/ENTERNEWPART.js
