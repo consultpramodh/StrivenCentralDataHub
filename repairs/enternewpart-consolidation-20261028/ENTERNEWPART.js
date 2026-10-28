@@ -543,9 +543,8 @@ function enp_verificationNumber_(value) {
 
 function enp_buildItemPayloadFromSheetRow_(row,col) {
  const n=row[col.NewItemNumber],name=row[col.NewItemName],price=enp_verificationNumber_(row[col.NewItemPrice]),cost=enp_verificationNumber_(row[col.NewItemCost]);
- if(!n||!name||price===null||(cost===null&&(!ENP_HUB_ACTIVE_PLAN||!ENP_HUB_ACTIVE_PLAN.costOmitted)))throw new Error('Hub item payload incomplete');
- const p={Id:0,ItemNumber:n,Name:name,Description:enp_guardCanonicalName_(name,n),Price:price,Active:true,Taxable:true};
- if(cost!==null)p.Cost=cost;
+ if(!n||!name||price===null||cost===null)throw new Error('Hub item payload incomplete');
+ const p={Id:0,ItemNumber:n,Name:name,Description:enp_guardCanonicalName_(name,n),Price:price,Cost:cost,Active:true,Taxable:true};
  const props=PropertiesService.getScriptProperties();
  [['IncomeGLAccount',ENP.PROPS.DEFAULT_INCOME_GL_ID],['InventoryAssetGLAccount',ENP.PROPS.DEFAULT_INVENTORY_GL_ID],
  ['COGSGLAccount',ENP.PROPS.DEFAULT_COGS_GL_ID]].forEach(function(pair){
@@ -556,37 +555,41 @@ function enp_buildItemPayloadFromSheetRow_(row,col) {
 }
 
 function enp_legacyHydrateReferences_(record,base) {
-  const fields={ItemType:['itemType','Inventory','ItemType'],DefaultInventoryLocation:['defaultInventoryLocation',record['Location Name'],'LocationName'],Category:['category',record['Item Category'],'ItemCategory'],PreferredVendor:['preferredVendor',record['Preferred Vendor'],'PreferredVendor'],Manufacturer:['manufacturer',record.Manufacturer,'Manufacturer']};
-  const props=PropertiesService.getScriptProperties(),raw=props.getProperty('ENTERNEWPART_HUB_REFERENCE_IDS');
-  const registry=raw?JSON.parse(raw):{},sheet=enp_guardHubBook_().getSheetByName('DATA_ITEMS');
-  if(!sheet)throw new Error('DATA_ITEMS cache missing; cannot select live reference witnesses');
-  const grid=sheet.getDataRange().getValues(),c=enp_indexByHeader_(grid[0]),ids=[],evidence={};
-  Object.keys(fields).forEach(function(field){
-    evidence[field]={};const pair=fields[field],col=c[pair[2]];
-    if(col==null||c.Id==null||c.ItemNumber==null)throw new Error('HUB_METADATA_BLOCKED: DATA_ITEMS missing '+pair[2]);
-    let n=0;const seen={};
-    for(const row of grid.slice(1)){
-      const id=Number(row[c.Id]);
-      if(!enp_guardUpper_(row[c.ItemNumber])||enp_guardUpper_(row[col])!==enp_guardUpper_(pair[1])||!Number.isSafeInteger(id)||id<=0||seen[id])continue;
-      seen[id]=true;if(ids.indexOf(id)<0)ids.push(id);if(++n>=6)break;
+  const fields={ItemType:['itemType','Inventory'],DefaultInventoryLocation:['defaultInventoryLocation',record['Location Name']],
+    Category:['category',record['Item Category']],PreferredVendor:['preferredVendor',record['Preferred Vendor']],
+    Manufacturer:['manufacturer',record.Manufacturer]};
+  const props=PropertiesService.getScriptProperties();
+  const raw=props.getProperty('ENTERNEWPART_HUB_REFERENCE_IDS');
+  let registry=raw?JSON.parse(raw):{};
+  Object.keys(fields).forEach(function(field){registry[field]=[];}); // Require fresh live evidence for every reference.
+  const sh=enp_guardHubBook_().getSheetByName('DATA_ITEMS');
+  if(!sh)throw new Error('DATA_ITEMS cache missing; cannot select live reference witnesses');
+  const grid=sh.getDataRange().getValues(),c=enp_indexByHeader_(grid[0]),ids=[];
+  grid.slice(1).forEach(function(r){
+    if(enp_guardUpper_(r[c.ItemCategory])===enp_guardUpper_(record['Item Category'])&&
+       enp_guardUpper_(r[c.PreferredVendor])===enp_guardUpper_(record['Preferred Vendor'])&&
+       enp_guardUpper_(r[c.Manufacturer])===enp_guardUpper_(record.Manufacturer)){
+      const id=Number(r[c.Id]);if(Number.isSafeInteger(id)&&id>0&&ids.indexOf(id)<0&&ids.length<6)ids.push(id);
     }
   });
   for(const id of ids){
     const live=enp_legacyLiveItem_(id);
     Object.keys(fields).forEach(function(field){
-      const pair=fields[field],ref=live[pair[0]]||live[field]||{},name=ref.name!=null?ref.name:ref.Name,rid=Number(ref.id!=null?ref.id:ref.Id);
-      if(enp_guardUpper_(name)===enp_guardUpper_(pair[1])&&Number.isSafeInteger(rid)&&rid>0)evidence[field][rid]=id;
+      const pair=fields[field],ref=live[pair[0]]||live[field]||{},name=ref.name!=null?ref.name:ref.Name;
+      const rid=Number(ref.id!=null?ref.id:ref.Id);
+      if(enp_guardUpper_(name)!==enp_guardUpper_(pair[1])||!Number.isSafeInteger(rid)||rid<=0)return;
+      const a=Array.isArray(registry[field])?registry[field]:[];
+      registry[field]=a.filter(function(x){return enp_guardUpper_(x.Name)!==enp_guardUpper_(pair[1]);})
+        .concat([{Id:rid,Name:pair[1],Verified:true,Evidence:'GET /v1/items/'+id+' on '+new Date().toISOString()}]);
     });
+    if(Object.keys(fields).every(function(field){try{enp_guardHubReference_(registry,field,fields[field][1]);return true;}catch(e){return false;}}))break;
   }
-  Object.keys(fields).forEach(function(field){
-    const found=Object.keys(evidence[field]);
-    if(found.length!==1)throw new Error('HUB_METADATA_BLOCKED: missing or ambiguous verified '+field+' ID for '+fields[field][1]);
-    const rid=Number(found[0]),id=evidence[field][found[0]];
-    registry[field]=[{Id:rid,Name:fields[field][1],Verified:true,Evidence:'GET /v1/items/'+id+' on '+new Date().toISOString()}];
-  });
-  if(base.ItemType&&Number(base.ItemType.Id)!==enp_guardHubReference_(registry,'ItemType','Inventory').Id)throw new Error('Legacy default item type differs from live Inventory type');
+  Object.keys(fields).forEach(function(field){enp_guardHubReference_(registry,field,fields[field][1]);});
+  if(base.ItemType && Number(base.ItemType.Id)!==enp_guardHubReference_(registry,'ItemType','Inventory').Id)throw new Error('Legacy default item type differs from live Inventory type');
+  // The user confirmed row 2 uses CAD and requested legacy execution.
   base.ItemType=enp_guardHubReference_(registry,'ItemType','Inventory');
-  registry.BaseCurrency='CAD';registry.LegacyUntrackedItemNumbers=['G190-0004-SER'];
+  registry.BaseCurrency='CAD';
+  registry.LegacyUntrackedItemNumbers=['G190-0004-SER'];
   props.setProperty('ENTERNEWPART_HUB_REFERENCE_IDS',JSON.stringify(registry));
 }
 
@@ -863,7 +866,7 @@ function enp_hubExecuteRow_(rowNumber) {
   enp_hubPersistItemId_(sheet,plan,itemId);
   const verified=enp_legacyLiveItem_(itemId);
   if(enp_guardUpper_(enp_guardItemNumber_(verified))!==enp_guardUpper_(plan.record['Item Number']))throw new Error('Live item SKU mismatch');
-  if(resolved.status==='CREATED'&&(enp_guardItemName_(verified)!==plan.record['Item Name']||enp_guardItemPrice_(verified)!==plan.price||(plan.cost!==null&&enp_guardItemCost_(verified)!==plan.cost)))throw new Error('Created item readback name/price/cost mismatch');
+  if(resolved.status==='CREATED'&&(enp_guardItemName_(verified)!==plan.record['Item Name']||enp_guardItemPrice_(verified)!==plan.price||enp_guardItemCost_(verified)!==plan.cost))throw new Error('Created item readback name/price/cost mismatch');
   if(!plan.soId){
    enp_hubWriteStatus_(sheet,plan,'COMPLETED','Manual catalog item verified; Item ID '+itemId+'. No SO linked.');
    return {status:'COMPLETED',row:rowNumber,itemId:itemId,itemResolution:resolved.status};
@@ -1481,23 +1484,6 @@ function enp_hubRowRecord_(grid,rowNumber) {
  return {record:record,col:col};
 }
 
-function enp_hubCanOmitCost_(record) {
- const blank=v=>v==null||String(v).trim()==='';
- if(!blank(record.Cost)||!blank(record.Discount))return false;
- const vendor=enp_guardUpper_(record['Preferred Vendor']);
- if(!vendor)return false;
- const sheet=enp_guardHubBook_().getSheetByName('ENP_VENDOR_RULES');
- if(!sheet)throw new Error('Vendor rules unavailable; cannot determine whether cost can be omitted');
- const rows=sheet.getDataRange().getValues(), h=enp_indexByHeader_(rows[0]);
- ['Supplier Name (Info!B)','Product Family (Info!C)','Discount'].forEach(k=>{if(h[k]==null)throw new Error('Vendor rules header missing: '+k);});
- const evidence=enp_guardUpper_([record['Item Name'],record.Description,record.Manufacturer].join(' '));
- return !rows.slice(1).some(function(row){
-   if(enp_guardUpper_(row[h['Supplier Name (Info!B)']])!==vendor||blank(row[h.Discount]))return false;
-   const family=enp_guardUpper_(row[h['Product Family (Info!C)']]);
-   return !family||evidence.indexOf(family)>=0;
- });
-}
-
 function enp_hubPlanRow_(grid,rowNumber) {
  const mapped=enp_hubRowRecord_(grid,rowNumber),r=mapped.record,source=enp_guardUpper_(r.Source);
  if(r['Create Authorized']!==true)throw new Error('Create Authorized must be TRUE');
@@ -1506,9 +1492,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
  const sku=enp_guardNorm_(r['Item Number']),name=enp_guardCanonicalName_(r['Item Name'],sku);
  if(name!==r['Item Name'])throw new Error('Item Name must be Item Name (Item Number)');
  const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost);
- if(price===null||price<0||(cost!==null&&cost<0))throw new Error('Nonnegative catalog Price and Cost required');
- const costOmitted=cost===null;
- if(costOmitted&&!enp_hubCanOmitCost_(r))throw new Error('Catalog Cost missing but a matching vendor discount exists or cost is invalid');
+ if(price===null||cost===null||price<0||cost<0)throw new Error('Nonnegative catalog Price and Cost required');
  if(r.Currency!=='CAD')throw new Error('Only verified CAD base currency is supported');
  if(r['Location Name']!=='60 - WAREHOUSE (Ajax)'||r['Item Type']!=='Inventory'||enp_guardUpper_(r.Taxable)!=='YES')throw new Error('Fixed location, taxable or item type differs');
  ['Item Category','Preferred Vendor','Manufacturer','Manufacturer Part#','Serial Number Tracking'].forEach(function(h){if(!enp_guardNorm_(r[h]))throw new Error('Missing '+h);});
@@ -1534,7 +1518,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
  });
  const fingerprint=enp_hubFingerprint_(r);
  return {rowNumber:rowNumber,record:r,col:mapped.col,source:source,soId:soId,quantity:qty,linePrice:linePrice,
- price:price,cost:cost,costOmitted:costOmitted,baseName:name.slice(0,-(' ('+sku+')').length),fingerprint:fingerprint};
+ price:price,cost:cost,baseName:name.slice(0,-(' ('+sku+')').length),fingerprint:fingerprint};
 }
 
 function enp_hubFingerprint_(r) {
@@ -1760,10 +1744,10 @@ function enp_guardHubPayloadFromRecord_(base, record, registry) {
   if (!enp_guardNorm_(r.Currency)) throw new Error('HUB_METADATA_BLOCKED: currency is unverified.');
   if (enp_guardUpper_(r.Currency) !== enp_guardUpper_(registry.BaseCurrency)) throw new Error('HUB_METADATA_BLOCKED: currency differs from verified company base currency.');
   const cost = enp_verificationNumber_(r.Cost), price = enp_verificationNumber_(r.Price);
-  if (price === null || price < 0 || (cost !== null && cost < 0) || (cost === null && !enp_hubCanOmitCost_(r))) throw new Error('HUB_METADATA_BLOCKED: Price or Cost invalid.');
+  if (cost === null || cost < 0 || price === null || price < 0) throw new Error('HUB_METADATA_BLOCKED: verified nonnegative Price and Cost are required.');
   const payload = Object.assign({},base,{
     Id:0,ItemNumber:enp_guardNorm_(r['Item Number']),Name:name,
-    Description:enp_guardNorm_(r.Description) || name,Price:price,Taxable:true,
+    Description:enp_guardNorm_(r.Description) || name,Price:price,Cost:cost,Taxable:true,
     ItemType:enp_guardHubReference_(registry,'ItemType','Inventory'),
     DefaultInventoryLocation:enp_guardHubReference_(registry,'DefaultInventoryLocation','60 - WAREHOUSE (Ajax)'),
     Category:enp_guardHubReference_(registry,'Category',r['Item Category']),
@@ -1771,7 +1755,6 @@ function enp_guardHubPayloadFromRecord_(base, record, registry) {
     Manufacturer:enp_guardHubReference_(registry,'Manufacturer',r.Manufacturer),
     ManufacturePartNumber:enp_guardNorm_(r['Manufacturer Part#'])
   });
-  if (cost === null) delete payload.Cost; else payload.Cost=cost;
   if (!payload.ManufacturePartNumber) throw new Error('HUB_METADATA_BLOCKED: Manufacturer Part# is required.');
   if (r.UPC != null && r.UPC !== '') {
     if (typeof r.UPC !== 'string') throw new Error('HUB_METADATA_BLOCKED: UPC must be text to preserve leading zeros.');
