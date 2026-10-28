@@ -1,4 +1,4 @@
-name: ENTERNEWPART guarded candidate processing
+name: ENTERNEWPART new-candidate live lookup
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -37,32 +37,19 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_enpReportReadOnlyProbe() {
-            const sheet=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),engine=hub_row2LegacyEngine_();
-            const expected=[[3,'PRPRD2','27391'],[11,'PVW47','23829'],[18,'482-917','23283'],[28,'SF-32-K','23174'],[29,'CVR36','23174'],[30,'GG-20R','23174'],[31,'4BVK','23141']];
-            const p=PropertiesService.getScriptProperties(),gate=LockService.getScriptLock();
-            if(!gate.tryLock(5000))return {status:'WORKER_BUSY'};
-            const leaseKey='HUB_ENP_WORKER_LEASE',token=Utilities.getUuid();
-            try{
-              const old=p.getProperty(leaseKey);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
-              p.setProperty(leaseKey,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
-            }finally{gate.releaseLock();}
-            const out=[];
-            try {
-              expected.forEach(function(spec){
-                const grid=sheet.getDataRange().getValues(),h=grid[0],row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
-                if(String(v('Item Number')).trim()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});return;}
-                if(v('Striven Item ID')){out.push({row:spec[0],status:'HAS_ITEM_ID_SKIP'});return;}
-                try{engine.enp_hubAutomaticPlan_(grid,spec[0]);}catch(e){out.push({row:spec[0],status:'REVIEW',reason:String(e.message||e).slice(0,250)});return;}
-                try{
-                  const result=engine.enp_hubExecuteRow_(spec[0]);
-                  out.push({row:spec[0],status:result.status,itemId:result.itemId||null});
-                }catch(e){out.push({row:spec[0],status:'BLOCKED',reason:String(e.message||e).slice(0,400)});}
-              });
-              return {status:'BATCH_TEST_FINISHED',results:out};
-            }finally{
-              const raw=p.getProperty(leaseKey);
-              if(raw&&JSON.parse(raw).token===token)p.deleteProperty(leaseKey);
+            const sh=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=grid[0],e=hub_row2LegacyEngine_(),out=[];
+            const items=[[68,'UKA 37/95/37/57','28139'],[69,'1044264fbv','28132'],[70,'SPAPLENUM-4','28132'],[73,'71540','28010']];
+            for(const spec of items){
+              const row=grid[spec[0]-1],v=k=>row[h.indexOf(k)];
+              if(String(v('Item Number')).trim()!==spec[1]||String(v('SO Internal ID')).trim()!==spec[2]){out.push({row:spec[0],status:'ROW_CHANGED'});continue;}
+              try{
+                const item=e.enp_legacyExactLookupNow_(spec[1]);
+                const so=e.enp_getSalesOrder_(Number(spec[2])),line=e.enp_findTargetPlaceholderLine_(e.enp_getSalesOrderLineItems_(so),{desiredItemNumber:spec[1],desiredQty:Number(v('Quantity')),newItemId:item?e.enp_guardItemId_(item):null});
+                const currency=so.currency||so.Currency||{};
+                out.push({row:spec[0],status:'CHECKED',found:!!item,itemId:item?e.enp_guardItemId_(item):null,lineId:line?(line.id||line.Id):null,currency:currency.currencyISOCode||currency.CurrencyISOCode||null});
+              }catch(err){out.push({row:spec[0],status:'BLOCKED',reason:String(err.message||err).slice(0,300)});}
             }
+            return {status:'NEW_CANDIDATES_CHECKED',results:out};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
