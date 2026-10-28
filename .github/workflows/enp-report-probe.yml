@@ -1,4 +1,4 @@
-name: Read-only ENTERNEWPART report probe
+name: One-time ENTERNEWPART queue refresh
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -51,18 +51,41 @@ jobs:
               const arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
               if(arrays.length!==1)return {status:'UNKNOWN_ENVELOPE',topLevelKeys:Object.keys(body||{}).slice(0,30)};
               const rows=arrays[0],fields=rows.length&&rows[0]&&typeof rows[0]==='object'?Object.keys(rows[0]):[];
-              const statuses={};
-              rows.forEach(function(r){const v=r.SalesOrderStatus||r.Status;if(v)statuses[String(v)]=(statuses[String(v)]||0)+1;});
-              const sh=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),hdr=grid[0],ix=x=>hdr.indexOf(x);
-              const norm=x=>String(x==null?'':x).trim().replace(/\r\n?/g,'\n');
-              const num=x=>Number(String(x==null?'':x).replace(/[$,\s]/g,''));
-              let matched=0,newRows=0,ambiguous=0,invalid=0;
-              rows.forEach(function(r){
-                if(!r.SalesOrderSalesOrderId||!r.ItemDescription||!['Approved','Quoted'].includes(String(r.SalesOrderStatus))){invalid++;return;}
-                const hits=grid.slice(1).filter(q=>norm(q[ix('SO Internal ID')])===norm(r.SalesOrderSalesOrderId)&&norm(q[ix('Original Description')])===norm(r.ItemDescription)&&Number(q[ix('Quantity')])===num(r.Quantity)&&Number(q[ix('SO Line Price')])===num(r.Price));
-                if(hits.length===1)matched++;else if(hits.length===0)newRows++;else ambiguous++;
-              });
-              return {status:'OK',count:rows.length,fields:fields,statuses:statuses,matched:matched,newRows:newRows,ambiguous:ambiguous,invalid:invalid};
+              const lock=LockService.getScriptLock();lock.waitLock(30000);
+              try {
+                const sh=SpreadsheetApp.getActive().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),hdr=grid[0],idx={};
+                hdr.forEach((h,i)=>{if(h)idx[String(h)]=i;});
+                const required=['Item Number','Item Name','Price','Source','Sales Order Number','SO Internal ID','SO Status','Quantity','SO Line Price','Original Description','Workflow Status','Review Reason','Last Source Update'];
+                required.forEach(h=>{if(idx[h]===undefined)throw new Error('MISSING_HEADER');});
+                const norm=x=>String(x==null?'':x).trim().replace(/\r\n?/g,'\n');
+                const numeric=x=>{const s=String(x==null?'':x).replace(/[$,\s]/g,'');return s!==''&&Number.isFinite(Number(s))?Number(s):null;};
+                const key=(id,desc,qty,price)=>JSON.stringify([norm(id),norm(desc),numeric(qty),numeric(price)]);
+                const seen=new Set(),existing=new Set();
+                grid.slice(1).forEach(q=>{if(q[idx['SO Internal ID']]&&q[idx['Original Description']])existing.add(key(q[idx['SO Internal ID']],q[idx['Original Description']],q[idx.Quantity],q[idx['SO Line Price']]));});
+                const candidates=[];
+                rows.forEach(r=>{
+                  const id=norm(r.SalesOrderSalesOrderId),desc=norm(r.ItemDescription),source=norm(r.SalesOrderStatus),qty=numeric(r.Quantity),price=numeric(r.Price);
+                  if(!id||!desc||!['Approved','Quoted'].includes(source)||qty===null||price===null)throw new Error('INVALID_REPORT_ROW');
+                  const k=key(id,desc,qty,price);if(seen.has(k))throw new Error('DUPLICATE_REPORT_IDENTITY');seen.add(k);
+                  if(!existing.has(k))candidates.push({r:r,id:id,desc:desc,source:source,qty:qty,price:price,k:k});
+                });
+                const slots=[];
+                for(let i=1;i<grid.length;i++){const q=grid[i];if(!q[idx['Item Number']]&&!q[idx.Source]&&!q[idx['Original Description']]&&!q[idx['SO Internal ID']])slots.push(i+1);}
+                if(slots.length<candidates.length)throw new Error('INSUFFICIENT_BLANK_ROWS');
+                let inserted=0;
+                candidates.forEach((c,j)=>{
+                  const row=slots[j],parsed=hub_descParseFields_(c.desc);
+                  const safe=x=>typeof x==='string'&&/^[=+@-]/.test(x)?"'"+x:x;
+                  sh.getRange(row,idx['Workflow Status']+1).setValue('HOLD');
+                  const values={'Item Number':parsed.itemNumber,'Item Name':parsed.name,'Price':parsed.price===null?'':parsed.price,'Source':c.source,'Sales Order Number':c.r.SalesOrderNumber||'','SO Internal ID':c.id,'SO Status':c.source,'Quantity':c.qty,'SO Line Price':c.price,'Original Description':c.desc,'Review Reason':'New report request: verify item identity and required metadata.','Last Source Update':new Date()};
+                  Object.keys(values).forEach(h=>sh.getRange(row,idx[h]+1).setValue(safe(values[h])));
+                  sh.getRange(row,idx['Workflow Status']+1).setValue('NEEDS REVIEW');
+                  SpreadsheetApp.flush();
+                  if(norm(sh.getRange(row,idx['SO Internal ID']+1).getValue())!==c.id||norm(sh.getRange(row,idx['Original Description']+1).getValue())!==c.desc)throw new Error('INTAKE_READBACK_FAILED');
+                  existing.add(c.k);inserted++;
+                });
+                return {status:'REFRESHED',reportRows:rows.length,inserted:inserted,alreadyPresent:rows.length-inserted,strivenWrites:0};
+              } finally {lock.releaseLock();}
             }catch(e){return {status:'FETCH_OR_PARSE_ERROR',errorType:String(e.name||'Error')};}
           }
           JS
@@ -74,7 +97,7 @@ jobs:
           name: enp-report-probe-pre
           path: PRE/src/
           retention-days: 30
-      - name: Probe report configuration and restore original source
+      - name: Refresh queue and restore original source
         env:
           REPORT_URL: ${{ secrets.HUB_ENP_REPORT_URL }}
         run: |
