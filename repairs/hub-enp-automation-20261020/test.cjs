@@ -192,12 +192,22 @@ test('scheduled callback rearms before work and skips stale or missing due times
  for(const delta of [null,2*60*60*1000,5*60*1000]){
   const x=ctx(),events=[];x.PropertiesService={getScriptProperties:()=>({getProperty:k=>k==='HUB_ENP_NEXT_RUN_AT'&&delta!==null?new Date(Date.now()-delta).toISOString():null})};
   x.hub_scheduleNextEnternewpartRun_=()=>{events.push('rearm');return {};};
-  x.hub_row2LegacyEngine_=()=>({enp_hubRunEligibleRows_:()=>{events.push('work');return {status:'COMPLETE'}}});
+  x.hub_refreshEnternewpartReport=()=>{events.push('refresh');return {reportRows:1,inserted:0,activeRows:[2],completedStillInReport:[]}};
+  x.hub_row2LegacyEngine_=()=>({enp_hubRunEligibleRows_:rows=>{assert.equal(rows.join(','),'2');events.push('work');return {status:'COMPLETE'}}});
   x.hub_enternewpartScheduledRun();assert.equal(events[0],'rearm');assert.equal(events.includes('work'),delta===5*60*1000);
  }
 });
 
 
+
+test('report failure stops worker; successful refresh limits eligible rows',()=>{
+ const x=ctx();let ran=0;
+ x.hub_row2LegacyEngine_=()=>({enp_hubRunEligibleRows_:rows=>{ran++;assert.equal(rows.join(','),'3,7');return {status:'COMPLETE'}}});
+ x.hub_refreshEnternewpartReport=()=>{throw Error('report unavailable')};
+ assert.throws(()=>x.hub_runEnternewpartReportWorker_(),/report unavailable/);assert.equal(ran,0);
+ x.hub_refreshEnternewpartReport=()=>({reportRows:2,inserted:0,activeRows:[3,7],completedStillInReport:[]});
+ assert.equal(x.hub_runEnternewpartReportWorker_().reportRefresh.activeRows,2);assert.equal(ran,1);
+});
 
 function genericExecute(opts={}) {
  const x=ctx(),r=gen(opts.manual?{Source:'Manual','SO Internal ID':'','Sales Order Number':'',Quantity:'','SO Line Price':''}:{Price:10,Cost:6,'SO Line Price':8}),g=grid(r),events=[];
