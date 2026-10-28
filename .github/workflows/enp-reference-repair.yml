@@ -81,3 +81,5 @@ jobs:
             refresh-post.txt
           retention-days: 30
           if-no-files-found: warn
+
+# Report-aware timer tests updated.
