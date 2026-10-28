@@ -1,4 +1,4 @@
-name: Inspect requested Apps Script project
+name: Inspect inventory report schema safely
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -11,7 +11,7 @@ concurrency:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -24,18 +24,43 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Pull and inspect source without executing it
+      - name: Back up and prepare read-only schema probe
         run: |
           set -euo pipefail
-          mkdir -p TARGET/src
-          printf '%s' '{"scriptId":"1kVwKBKX8DXCmjBXs4vjIRuyMD2lwMejAZEuVjvK6Yi6YRNCmqFlP9UhG","rootDir":"src"}' > TARGET/.clasp.json
-          clasp pull --project TARGET
-          python3 - <<'PY'
-          import pathlib
-          lines=pathlib.Path('TARGET/src/create_newitems.js').read_text().splitlines()
-          for a,b in [(1,20),(98,132),(198,220)]:
-              for i in range(a,b+1):
-                  l=lines[i-1]
-                  if any(w in l.lower() for w in ('token','secret','password','authorization','bearer')): continue
-                  print('LINE',i,l[:200])
-          PY
+          for d in PRE WORK FRESH VERIFY; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          cp -a PRE/src/. WORK/src/
+          cat >> WORK/src/ENTERNEWPART.js <<'JS'
+          
+          function hub_probeInventoryReportSchema() {
+            const props=PropertiesService.getScriptProperties();
+            const url=props.getProperty('STRIVEN_STD_ITEMS_REPORT_URL');
+            if(!url)return {status:'MISSING_REPORT_PROPERTY'};
+            const token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID'),props.getProperty('CLIENT_SECRET')).accessToken;
+            const page=hub_stdItemsFetchPage_(url,token,0,10);
+            const rows=hub_stdItemsExtractRows_(page);
+            if(!rows.length)return {status:'EMPTY_REPORT'};
+            return {status:'OK',rowCount:rows.length,columns:Object.keys(rows[0])};
+          }
+          JS
+          node --check WORK/src/ENTERNEWPART.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - name: Inspect report and restore source
+        run: |
+          set -euo pipefail
+          restore() {
+            trap - EXIT
+            clasp pull --project VERIFY
+            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
+            clasp push --force --project PRE
+            clasp pull --project VERIFY
+            diff -qr PRE/src VERIFY/src
+          }
+          trap restore EXIT
+          clasp push --force --project WORK
+          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
+          grep -q 'status' probe.txt
