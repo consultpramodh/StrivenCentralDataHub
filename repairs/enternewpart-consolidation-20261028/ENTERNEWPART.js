@@ -3101,7 +3101,7 @@ function hub_refreshEnternewpartReport() {
   const range=filter.getRange();
   if(range.getRow()!==1||range.getColumn()!==1||range.getNumRows()<sh.getMaxRows()||range.getNumColumns()<headers.length)
     throw new Error('ENTERNEWPART filter does not cover the queue');
-  const formula=active.length?'=AND($B2<>"",$Z2<>"COMPLETED",OR('+active.map(n=>'ROW()='+n).join(',')+'))':'=FALSE';
+  const formula=active.length?'=AND($Z2<>"COMPLETED",OR('+active.map(n=>'ROW()='+n).join(',')+'))':'=FALSE';
   filter.setColumnFilterCriteria(idx['Item Number']+1,SpreadsheetApp.newFilterCriteria().whenFormulaSatisfied(formula).build());
   SpreadsheetApp.flush();
   return {status:'REFRESHED',reportRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport};
