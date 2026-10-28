@@ -20,7 +20,7 @@ jobs:
       - run: npm install --global @google/clasp@3.3.0
       - name: Configure existing Google authorization
         env:
-          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
         run: |
           set -euo pipefail
           test -n "${CLASPRC_JSON:-}"
@@ -98,3 +98,5 @@ jobs:
             execution-post.txt
           retention-days: 30
           if-no-files-found: warn
+
+# Retry with Hub-specific OAuth client.
