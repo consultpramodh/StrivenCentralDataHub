@@ -1,4 +1,4 @@
-name: ENTERNEWPART scoped second order execution
+name: ENTERNEWPART guarded item-group bridge test
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -35,7 +35,7 @@ jobs:
           clasp pull --project PRE
           cp -a PRE/src/. WORK/src/
           test "$(git hash-object PRE/src/ENTERNEWPART.js)" = "2810880e95165d66348dc92d9b177816f06d7fb2"
-          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "b83aecb94c96aae8eb891e4fb7c7e45f5ee12326"
+          test "$(git hash-object repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js)" = "4753b2aaf360b9e0a023caff58ded66293960011"
           cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
           node repairs/hub-enp-automation-20261020/test.cjs WORK/src
           node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
@@ -50,19 +50,33 @@ jobs:
               const old=p.getProperty(key);if(old&&JSON.parse(old).until>Date.now())return {status:'WORKER_BUSY'};
               p.setProperty(key,JSON.stringify({token:token,until:Date.now()+5*60*1000}));
             }finally{gate.releaseLock();}
+            let original=null, result='NOT_ATTEMPTED', reason='';
             try{
-              const rowNum=72,grid=sh.getDataRange().getValues(),h=grid[0],row=grid[rowNum-1],v=k=>row[h.indexOf(k)];
-              if(String(v('Item Number')).trim()!=='SPAPLENUM-4'||String(v('SO Internal ID')).trim()!=='28125'||
+              const grid=sh.getDataRange().getValues(),h=grid[0],row=grid[69],v=k=>row[h.indexOf(k)];
+              if(String(v('Item Number')).trim()!=='SPAPLENUM-4'||String(v('SO Internal ID')).trim()!=='28132'||
                  Number(v('Quantity'))!==1||Number(v('SO Line Price'))!==224||Number(v('Striven Item ID'))!==43467||
                  String(v('Workflow Status')).toUpperCase()==='COMPLETED')return {status:'ROW_CHANGED'};
-              const so=e.enp_getSalesOrder_(28125),lines=e.enp_getSalesOrderLineItems_(so);
-              const plans=e.enp_prepareItemGroupMasterBridgePlans_(28125,lines,{});
-              if(plans.length)return {status:'GROUP_BRIDGE_NEEDED',groupIds:plans.map(x=>x.parentItemId).join(',')};
+              const so=e.enp_getSalesOrder_(28132),lines=e.enp_getSalesOrderLineItems_(so);
+              const plans=e.enp_prepareItemGroupMasterBridgePlans_(28132,lines,{});
+              if(plans.length!==1||plans[0].parentItemId!==42686)return {status:'GROUP_SCOPE_CHANGED',ids:plans.map(x=>x.parentItemId).join(',')};
+              original=plans[0].originalPayload;
               try{
-                e.enp_hubAutomaticPlan_(grid,rowNum);
-                const result=e.enp_hubExecuteRow_(rowNum);
-                return {status:'SECOND_ORDER_RESULT',result:JSON.stringify(result)};
-              }catch(err){return {status:'SECOND_ORDER_BLOCKED',reason:String(err.message||err).slice(0,700)};}
+                e.enp_hubAutomaticPlan_(grid,70);
+                const r=e.enp_hubExecuteRow_(70);
+                result=r.status;reason=JSON.stringify(r);
+              }catch(err){result='BLOCKED';reason=String(err.message||err).slice(0,700);}
+              try{
+                const keys=Object.keys(p.getProperties()).filter(k=>k.indexOf(e.enp_itemGroupBridgeRecoveryPrefix_())===0);
+                if(keys.length)e.enp_recoverItemGroupMasterBridgeWatchdog();
+                const live=e.enp_getStrivenItemById_(42686,{});
+                e.enp_verifyItemGroupMasterPayload_(live,original,'Final restoration check');
+                const remaining=Object.keys(p.getProperties()).filter(k=>k.indexOf(e.enp_itemGroupBridgeRecoveryPrefix_())===0);
+                if(remaining.length)throw new Error('Recovery journal remains');
+                return {status:'MASTER_RESTORED',orderResult:result,detail:reason};
+              }catch(err){
+                p.setProperty('HUB_ENP_AUTOMATION_ENABLED','false');
+                return {status:'MASTER_RECOVERY_NEEDED',orderResult:result,detail:reason,recoveryError:String(err.message||err).slice(0,500)};
+              }
             }finally{
               const raw=p.getProperty(key);
               if(raw&&JSON.parse(raw).token===token)p.deleteProperty(key);
@@ -84,6 +98,7 @@ jobs:
           set -euo pipefail
           restore() {
             trap - EXIT
+            if ! grep -q 'MASTER_RESTORED' report-probe.txt; then echo 'Recovery not verified: leaving patched source in place for watchdog'; return 1; fi
             clasp pull --project VERIFY
             diff -qr WORK/src VERIFY/src || { echo 'Live source changed during run; refusing to overwrite'; return 1; }
             clasp push --force --project PRE
