@@ -3094,6 +3094,12 @@ function hub_refreshEnternewpartReport() {
     if(norm(sh.getRange(row,idx['SO Internal ID']+1).getValue())!==c.id||norm(sh.getRange(row,idx['Original Description']+1).getValue())!==c.desc)throw new Error('ENTERNEWPART intake readback failed');
    }
    const rowStatus=existing.has(c.key)?norm(grid[row-1][idx['Workflow Status']]).toUpperCase():'NEEDS REVIEW';
+   if(rowStatus!=='COMPLETED'&&existing.has(c.key)&&
+      (norm(grid[row-1][idx.Source])!==c.status||norm(grid[row-1][idx['SO Status']])!==c.status)){
+    sh.getRange(row,idx.Source+1).setValue(c.status);
+    sh.getRange(row,idx['SO Status']+1).setValue(c.status);
+    sh.getRange(row,idx['Last Source Update']+1).setValue(new Date());
+   }
    if(rowStatus==='COMPLETED')completedStillInReport.push(row);else active.push(row);
   });
   let filter=sh.getFilter();
