@@ -2451,7 +2451,17 @@ function enp_itemGroupBridgeRecoveryKey_(parentItemId) {
 
 function enp_postAndVerifyItemGroupMaster_(parentItemId, payload, label) {
   const expectedId = enp_num_(parentItemId);
-  const res = enp_guardResolutionAsItemResponse_(enp_guardCreateOrResolveItem_(payload));
+  if (!Number.isSafeInteger(expectedId) || expectedId <= 0 || enp_num_(payload && payload.Id) !== expectedId)
+    throw new Error(label + ': invalid or mismatched Item Group ID.');
+  const before = enp_getStrivenItemById_(expectedId, {});
+  const type = before.itemType || before.ItemType || {};
+  const typeId = enp_num_(type.id != null ? type.id : type.Id);
+  const typeName = enp_guardUpper_(type.name != null ? type.name : type.Name);
+  if (typeId !== 5 && typeName !== 'ITEM GROUP') throw new Error(label + ': target is not an Item Group.');
+  const beforeNumber = enp_guardItemNumber_(before);
+  if (!beforeNumber || enp_guardUpper_(beforeNumber) !== enp_guardUpper_(payload.ItemNumber))
+    throw new Error(label + ': existing Item Group identity mismatch.');
+  const res = enp_strivenFetch_('/v1/items', {method:'post', body:payload});
 
   const responseId = enp_extractItemId_(res);
   if (responseId && enp_num_(responseId) !== expectedId) {
