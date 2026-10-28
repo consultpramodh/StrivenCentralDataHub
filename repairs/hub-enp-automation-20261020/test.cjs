@@ -209,6 +209,18 @@ test('report failure stops worker; successful refresh limits eligible rows',()=>
  assert.equal(x.hub_runEnternewpartReportWorker_().reportRefresh.activeRows,2);assert.equal(ran,1);
 });
 
+test('missing cost is omitted only when vendor rules lack a matching discount',()=>{
+ const x=ctx(),rules=[['Vendor Rule Key','Supplier Name (Info!B)','Product Family (Info!C)','Discount'],['P - Astria','Powrmatic','Astria',0.4],['W - Hearth Parts','Wolf Steel Ltd.','Hearth Parts',0.4],['G','Generic Vendor','',0.5]];
+ x.enp_guardHubBook_=()=>({getSheetByName:()=>({getDataRange:()=>({getValues:()=>rules})})});
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:'','Preferred Vendor':'Powrmatic','Item Name':'Spartherm'}),true);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:'','Preferred Vendor':'Powrmatic','Item Name':'Astria stove'}),false);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:'','Preferred Vendor':'Wolf Steel Ltd.','Item Category':'Hearth - Parts'}),false);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:'','Preferred Vendor':'Generic Vendor'}),false);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'bad',Discount:'','Preferred Vendor':'Powrmatic'}),false);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:0.4,'Preferred Vendor':'Powrmatic'}),false);
+ assert.equal(x.enp_hubCanOmitCost_({Cost:'',Discount:'','Preferred Vendor':''}),false);
+});
+
 function genericExecute(opts={}) {
  const x=ctx(),r=gen(opts.manual?{Source:'Manual','SO Internal ID':'','Sales Order Number':'',Quantity:'','SO Line Price':''}:{Price:10,Cost:6,'SO Line Price':8}),g=grid(r),events=[];
  x.Utilities=util();x.PropertiesService={getScriptProperties:()=>({getProperty:()=>null})};
