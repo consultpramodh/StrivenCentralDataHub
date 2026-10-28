@@ -36,24 +36,25 @@ jobs:
           cp -a PRE/src/. WORK/src/
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
-          function hub_enpReportReadOnlyProbe() {
-            const props=PropertiesService.getScriptProperties();
-            return ['STRIVEN_ENTERNEWPART_REPORT_API','STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'].map(function(key){
-              const url=props.getProperty(key);
-              if(!url)return {key:key,status:'PROPERTY_MISSING'};
-              try{
-                const parsed=String(url);
-                if(!/^https:\/\//i.test(parsed)) return {key:key,status:'NON_HTTPS'};
-                const response=UrlFetchApp.fetch(parsed,{method:'get',muteHttpExceptions:true,followRedirects:false});
-                const code=response.getResponseCode();
-                if(code!==200)return {key:key,status:'HTTP_ERROR',httpCode:code};
-                const body=JSON.parse(response.getContentText());
-                const candidates=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
-                if(candidates.length!==1)return {key:key,status:'UNKNOWN_ENVELOPE',topLevelKeys:Object.keys(body||{}).slice(0,30)};
-                const rows=candidates[0],fields=rows.length&&rows[0]&&typeof rows[0]==='object'?Object.keys(rows[0]):[];
-                return {key:key,status:'OK',count:rows.length,fields:fields};
-              }catch(e){return {key:key,status:'FETCH_OR_PARSE_ERROR',errorType:String(e.name||'Error')};}
-            });
+          function hub_enpReportReadOnlyProbe(url) {
+            if(!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(String(url)))return {status:'INVALID_REPORT_URL'};
+            const p=PropertiesService.getScriptProperties();
+            const cid=p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID');
+            const secret=p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET');
+            if(!cid||!secret)return {status:'HUB_STRIVEN_CREDENTIALS_MISSING'};
+            try{
+              const token=hub_strivenAccessToken_(cid,secret).accessToken;
+              const response=UrlFetchApp.fetch(String(url),{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false});
+              const code=response.getResponseCode();
+              if(code!==200)return {status:'HTTP_ERROR',httpCode:code};
+              const body=JSON.parse(response.getContentText());
+              const arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
+              if(arrays.length!==1)return {status:'UNKNOWN_ENVELOPE',topLevelKeys:Object.keys(body||{}).slice(0,30)};
+              const rows=arrays[0],fields=rows.length&&rows[0]&&typeof rows[0]==='object'?Object.keys(rows[0]):[];
+              const statuses={};
+              rows.forEach(function(r){const v=r.SalesOrderStatus||r.Status;if(v)statuses[String(v)]=(statuses[String(v)]||0)+1;});
+              return {status:'OK',count:rows.length,fields:fields,statuses:statuses};
+            }catch(e){return {status:'FETCH_OR_PARSE_ERROR',errorType:String(e.name||'Error')};}
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
@@ -65,6 +66,8 @@ jobs:
           path: PRE/src/
           retention-days: 30
       - name: Probe report configuration and restore original source
+        env:
+          REPORT_URL: ${{ secrets.HUB_ENP_REPORT_URL }}
         run: |
           set -euo pipefail
           restore() {
@@ -75,9 +78,10 @@ jobs:
           }
           trap restore EXIT
           clasp push --force --project WORK
-          clasp run hub_enpReportReadOnlyProbe --project WORK | tee report-probe.txt
+          PARAMS=$(python3 -c 'import json,os; print(json.dumps([os.environ["REPORT_URL"]]))')
+          clasp run hub_enpReportReadOnlyProbe --params "$PARAMS" --project WORK | tee report-probe.txt
           if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed' report-probe.txt; then exit 1; fi
-          grep -q 'STRIVEN_ENTERNEWPART_REPORT_API' report-probe.txt
+          grep -q 'status' report-probe.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
