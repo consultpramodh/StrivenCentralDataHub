@@ -1,0 +1,100 @@
+name: Guarded ENTERNEWPART consolidation
+on:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-consolidation-guarded.yml']
+permissions:
+  contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure existing Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Pull and prepare exact live project
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH POST; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          printf '%s\n' '070568e81e24640d9d6a2da3a970b9aff573d26ed8f0e7e75b9cb3a052a84cbe  PRE/src/10_Central_Hub.js' | sha256sum -c -
+          test ! -e PRE/src/ENTERNEWPART.js
+          cp -a PRE/src/. WORK/src/
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('WORK/src/10_Central_Hub.js')
+          s=p.read_text()
+          a=s.index('// Google Apps Script — pure parser/classifier; no external API calls.')
+          b=s.index('// Google Apps Script — strict search-page envelope adapter.',a)
+          c=s.index('function enp_runHubRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_runHubRow2CreateAndReplace(); }',b)
+          moved=s[a:b]+'\n'+s[c:]
+          candidate=Path('repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js').read_text()
+          if moved != candidate: raise SystemExit('Consolidation differs from reviewed candidate')
+          p.write_text(s[:a]+s[b:c])
+          Path('WORK/src/ENTERNEWPART.js').write_text(moved)
+          PY
+          for f in WORK/src/*.js; do node --check "$f"; done
+          node repairs/hub-enp-automation-20261020/test.cjs WORK/src
+          node repairs/enp-search-empty-20261020/test.cjs WORK/src/10_Central_Hub.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - name: Preserve exact pre-change source
+        uses: actions/upload-artifact@v4
+        with:
+          name: enternewpart-consolidation-pre
+          path: PRE/src/
+          retention-days: 30
+          if-no-files-found: error
+      - name: Verify Apps Script execution access before any push
+        shell: bash
+        run: |
+          set -euo pipefail
+          clasp run hub_previewEnternewpartAutomation --project PRE 2>&1 | tee execution-preflight.txt
+          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed|error' execution-preflight.txt; then
+            echo 'EXECUTION_ACCESS_UNAVAILABLE: no source changes were made.'
+            exit 1
+          fi
+          grep -q 'eligible' execution-preflight.txt || { echo 'Preview returned no verifiable result; no push.'; exit 1; }
+      - name: Push and verify entire project, roll back on failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          rollback() { trap - ERR; clasp push --force --project PRE; exit 1; }
+          trap rollback ERR
+          clasp push --force --project WORK
+          clasp pull --project POST
+          diff -qr WORK/src POST/src
+          clasp run hub_previewEnternewpartAutomation --project POST 2>&1 | tee execution-post.txt
+          if grep -qiE 'unable to run|permission|not deployed|not found|script function.*failed|error' execution-post.txt; then exit 1; fi
+          grep -q 'eligible' execution-post.txt
+          trap - ERR
+          echo 'CONSOLIDATION_PUSHED_AND_VERIFIED'
+      - name: Preserve verification source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enternewpart-consolidation-post
+          path: |
+            POST/src/
+            execution-preflight.txt
+            execution-post.txt
+          retention-days: 30
+          if-no-files-found: warn
