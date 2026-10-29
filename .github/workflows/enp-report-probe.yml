@@ -35,7 +35,7 @@ jobs:
             printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
           done
           clasp pull --project PRE
-          git show b864e66fdda1f74ad05a01198ce67cc49e07584b > expected.js
+          git show 2459728ee64bc27b4e986b9721ddac8f4f110bd3 > expected.js
           cmp expected.js PRE/src/ENTERNEWPART.js || { echo 'Live source differs from reviewed baseline; stopped'; exit 1; }
           cp -a PRE/src/. WORK/src/
           cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
