@@ -1,4 +1,4 @@
-name: Inspect inventory report schema safely
+name: Process report items with user-selected tracking NO
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -36,20 +36,37 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
           
           function hub_probeInventoryReportSchema() {
-            const props=PropertiesService.getScriptProperties();
-            const url=props.getProperty('STRIVEN_STD_ITEMS_REPORT_URL');
-            if(!url)return {status:'MISSING_REPORT_PROPERTY'};
-            const token=hub_strivenAccessToken_(props.getProperty('CLIENT_ID'),props.getProperty('CLIENT_SECRET')).accessToken;
-            const page=hub_stdItemsFetchPage_(url,token,0,10);
-            const rows=hub_stdItemsExtractRows_(page);
-            if(!rows.length)return {status:'EMPTY_REPORT'};
-            return {status:'OK',rowCount:rows.length,columns:Object.keys(rows[0])};
+            const before=hub_refreshEnternewpartReport();
+            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+            const h=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0], ix=h.indexOf('Serial Number Tracking'), status=h.indexOf('Workflow Status');
+            if(ix<0||status<0)throw Error('Required header missing');
+            const lock=LockService.getScriptLock();lock.waitLock(30000);
+            try {
+              const lease=PropertiesService.getScriptProperties().getProperty('HUB_ENP_WORKER_LEASE');
+              if(lease&&JSON.parse(lease).until>Date.now())throw Error('Worker already running');
+              before.activeRows.forEach(function(n){
+                const state=String(sh.getRange(n,status+1).getValue()).toUpperCase();
+                if(['HOLD','PAUSED','DO NOT CREATE'].includes(state))return;
+                const cell=sh.getRange(n,ix+1);
+                cell.setValue('NO').setNote('2026-10-29: User instructed serial tracking NO for current ENTERNEWPART report items.');
+              });
+              SpreadsheetApp.flush();
+            }finally{lock.releaseLock();}
+            const results=[];
+            for(let i=0;i<3;i++){
+              const current=hub_refreshEnternewpartReport();
+              const out=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(current.activeRows);
+              results.push(out);
+              if(out.status!=='COMPLETE'||!out.processed||out.results.some(x=>x.reportRefresh&&x.reportRefresh.status==='FAILED'))break;
+            }
+            const after=hub_refreshEnternewpartReport();
+            return {status:'DONE',before:before.reportRows,after:after.reportRows,activeRows:after.activeRows,completedStillInReport:after.completedStillInReport,results:results};
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
           diff -qr PRE/src FRESH/src
-      - name: Inspect report and restore source
+      - name: Process authorized report items and restore source
         run: |
           set -euo pipefail
           restore() {
