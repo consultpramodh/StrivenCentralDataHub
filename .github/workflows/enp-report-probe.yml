@@ -36,27 +36,11 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
           
           function hub_probeInventoryReportSchema() {
-            const before=hub_refreshEnternewpartReport(),e=hub_row2LegacyEngine_(),book=e.enp_guardHubBook_(),sh=book.getSheetByName('ENTERNEWPART');
-            const grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]),so=e.enp_getSalesOrder_(28177),cur=so.currency||so.Currency||{};
-            if(String(cur.currencyISOCode||cur.CurrencyISOCode)!=='CAD')throw Error('Order currency not verified CAD');
-            const witness=e.enp_legacyLiveItem_(23241),vendor=witness.preferredVendor||witness.PreferredVendor||{},maker=witness.manufacturer||witness.Manufacturer||{};
-            if(Number(vendor.id||vendor.Id)!==51978||Number(maker.id||maker.Id)!==51978)throw Error('Supplier account witness changed');
-            const rules=book.getSheetByName('ENP_VENDOR_RULES').getDataRange().getValues(),matches=rules.slice(1).filter(r=>String(r[1]).trim()==='Urban Hearth'&&!String(r[2]||'').trim());
-            if(matches.length!==1||Number(matches[0][3])!==0.4)throw Error('Urban Hearth discount rule ambiguous');
-            const category={'CSK-25':'Hearth - Gas - Insert','CXS-BB900':'Hearth - Accessories','CK25-RSF':'Hearth - Accessories','CK25-22536':'Hearth - Accessories'},changed=[];
-            for(const rowNum of before.activeRows){
-              const r=grid[rowNum-1],sku=String(r[h['Item Number']]||'').toUpperCase();
-              if(!category[sku]||Number(r[h['SO Internal ID']])!==28177)continue;
-              const state=e.enp_guardUpper_(r[h['Workflow Status']]);if(e.enp_hubIsHeld_(state))continue;
-              const values={'Preferred Vendor':'Urban Hearth','Manufacturer':'Urban Hearth','Item Category':category[sku],'Currency':'CAD','Discount':0.4};
-              Object.keys(values).forEach(k=>{if(h[k]==null)throw Error('Missing header '+k);const existing=r[h[k]];if(existing!==''&&existing!=null&&String(existing)!==String(values[k]))throw Error('Existing value conflicts: '+k);});
-              Object.keys(values).forEach(k=>{const cell=sh.getRange(rowNum,h[k]+1);if(r[h[k]]===''||r[h[k]]==null)cell.setValue(values[k]).setNote(k==='Manufacturer'?'Supplier account used as manufacturer, consistent with existing Urban Hearth catalog item 23241.':k==='Currency'?'Verified from live sales order 586442.':'Kozy Heat supplied by Urban Hearth; category from reported product; discount from ENP_VENDOR_RULES.');});
-              changed.push({row:rowNum,sku:sku});
-            }
-            SpreadsheetApp.flush();
-            const out=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(before.activeRows);
+            const before=hub_refreshEnternewpartReport();
+            const remaining=before.activeRows.filter(n=>[76,77].includes(n));
+            const result=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(remaining);
             const after=hub_refreshEnternewpartReport();
-            return JSON.stringify({status:'ENRICHED',changed:changed,worker:out,remaining:after.reportRows,activeRows:after.activeRows});
+            return JSON.stringify({status:'RESULT',worker:result,reportRows:after.reportRows,activeRows:after.activeRows,completedStillInReport:after.completedStillInReport});
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
