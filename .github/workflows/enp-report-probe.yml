@@ -1,84 +1,10 @@
-name: Process report items with user-selected tracking NO
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  inspect:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up and prepare read-only schema probe
-        run: |
-          set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-          
-          function hub_probeInventoryReportSchema() {
-            const before=hub_refreshEnternewpartReport();
-            const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
-            const h=sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0], ix=h.indexOf('Serial Number Tracking'), status=h.indexOf('Workflow Status');
-            if(ix<0||status<0)throw Error('Required header missing');
-            const lock=LockService.getScriptLock();lock.waitLock(30000);
-            try {
-              const lease=PropertiesService.getScriptProperties().getProperty('HUB_ENP_WORKER_LEASE');
-              if(lease&&JSON.parse(lease).until>Date.now())throw Error('Worker already running');
-              before.activeRows.forEach(function(n){
-                const state=String(sh.getRange(n,status+1).getValue()).toUpperCase();
-                if(['HOLD','PAUSED','DO NOT CREATE'].includes(state))return;
-                [['Location Name','60 - WAREHOUSE (Ajax)'],['Taxable','Yes'],['Item Type','Inventory']].forEach(function(pair){const col=h.indexOf(pair[0]);if(col<0)throw Error('Required header missing');const cell=sh.getRange(n,col+1);const value=cell.getValue();if(value===''||value==null)cell.setValue(pair[1]);});
-                const cell=sh.getRange(n,ix+1);
-                cell.setValue('NO').setNote('2026-10-29: User instructed serial tracking NO for current ENTERNEWPART report items.');
-              });
-              SpreadsheetApp.flush();
-            }finally{lock.releaseLock();}
-            const results=[];
-            for(let i=0;i<3;i++){
-              const current=hub_refreshEnternewpartReport();
-              const out=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(current.activeRows);
-              results.push(out);
-              if(out.status!=='COMPLETE'||!out.processed||out.results.some(x=>x.reportRefresh&&x.reportRefresh.status==='FAILED'))break;
-            }
-            const after=hub_refreshEnternewpartReport();
-            return {status:'DONE',before:before.reportRows,after:after.reportRows,activeRows:after.activeRows,completedStillInReport:after.completedStillInReport,results:results};
-          }
-          JS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-      - name: Process authorized report items and restore source
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
-          grep -q 'status' probe.txt
+      - run: echo 'No operational action configured'
