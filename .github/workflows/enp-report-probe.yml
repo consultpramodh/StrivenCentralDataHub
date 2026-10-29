@@ -1,10 +1,50 @@
-name: ENTERNEWPART probe placeholder
+name: Deploy optional manufacturer policy
 on:
-  workflow_dispatch:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
   contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
 jobs:
-  placeholder:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo 'No operational action configured'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Compare live source and deploy bridge fix
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH VERIFY; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          git show c867646dce8947869d00a4e2e3b2ebb21db7d62d > expected.js
+          cmp expected.js PRE/src/ENTERNEWPART.js || { echo 'Live source differs from reviewed baseline; stopped'; exit 1; }
+          cp -a PRE/src/. WORK/src/
+          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
+          node --check WORK/src/ENTERNEWPART.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+          clasp push --force --project WORK
+          clasp pull --project VERIFY
+          diff -qr WORK/src VERIFY/src
+          echo 'DEPLOYED_VERIFIED'
+          clasp run hub_processEnternewpartAutomation --project WORK | tee result.txt
+          grep -q status result.txt
