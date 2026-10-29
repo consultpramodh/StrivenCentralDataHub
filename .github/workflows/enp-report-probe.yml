@@ -49,7 +49,7 @@ jobs:
           from pathlib import Path
           p=Path('WORK/src/ENTERNEWPART.js')
           s=p.read_text()
-          old="enp_itemGroupDefinitionSignature_(liveGroups) !==\\n    enp_itemGroupDefinitionSignature_(expectedGroups)"
+          old="enp_itemGroupDefinitionSignature_(liveGroups) !=="+chr(10)+"    enp_itemGroupDefinitionSignature_(expectedGroups)"
           new="""enp_itemGroupDefinitionSignature_(liveGroups) !==
               enp_itemGroupDefinitionSignature_(expectedGroups) &&
             !(label.indexOf('Temporary bridge for Item Group ') === 0 &&
