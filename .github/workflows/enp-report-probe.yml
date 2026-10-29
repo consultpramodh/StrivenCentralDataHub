@@ -36,13 +36,16 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
           
           function hub_probeInventoryReportSchema() {
-            const before=hub_refreshEnternewpartReport();
-            const e=hub_row2LegacyEngine_(),sh=e.enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]),wanted=['UKA 37/95/37/57','71540','1TLMXXX05-10'];
-            const rows=before.activeRows.filter(n=>wanted.includes(e.enp_guardUpper_(grid[n-1][h['Item Number']])));
-            const run=e.enp_hubRunEligibleRows_(rows);
-            const after=hub_refreshEnternewpartReport(),newGrid=sh.getDataRange().getValues();
-            const status=rows.map(n=>({row:n,sku:newGrid[n-1][h['Item Number']],status:newGrid[n-1][h['Workflow Status']],reason:newGrid[n-1][h['Review Reason']],itemId:newGrid[n-1][h['Striven Item ID']],stillInReport:after.activeRows.includes(n)||after.completedStillInReport.includes(n)}));
-            return JSON.stringify({status:'DONE',reportRows:after.reportRows,rows:status,worker:run,completedStillInReport:after.completedStillInReport});
+            const e=hub_row2LegacyEngine_(),out=[];
+            for(const sku of ['UKA 37/95/37/57','71540','1TLMXXX05-10']){
+              const res=e.enp_guardRawRequest_('POST','/v1/items/search',{ItemNumber:sku,PageIndex:0,PageSize:1000},false);
+              if(!res.ok)throw Error('Item search failed HTTP '+res.code);
+              const page=e.enp_legacySearchPage_(res.body);
+              if(page.rows.length>=1000 || (page.count!==null&&page.count>page.rows.length))throw Error('Search incomplete for '+sku);
+              const exact=page.rows.filter(x=>e.enp_guardUpper_(e.enp_guardItemNumber_(x))===sku);
+              out.push({sku:sku,matches:exact.map(x=>({id:e.enp_guardItemId_(x),name:e.enp_guardItemName_(x),active:x.active!=null?x.active:x.Active}))});
+            }
+            return JSON.stringify({status:'LIVE_LOOKUP',results:out});
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
