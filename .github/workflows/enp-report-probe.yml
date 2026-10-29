@@ -1,65 +1,10 @@
-name: Inspect inventory report schema safely
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  inspect:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up and prepare read-only schema probe
-        run: |
-          set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          cmp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js PRE/src/ENTERNEWPART.js || { echo 'LIVE_SOURCE_MISMATCH'; exit 1; }
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-          
-          function hub_probeInventoryReportSchema() {
-            const p=PropertiesService.getScriptProperties(),keys=['HUB_ENP_AUTOMATION_ENABLED','HUB_ENP_NEXT_RUN_AT','HUB_ENP_PAUSE_UNTIL','HUB_ENP_WORKER_LEASE'];
-            const config={};keys.forEach(k=>config[k]=p.getProperty(k));
-            const triggers=ScriptApp.getProjectTriggers().filter(t=>['hub_processEnternewpartAutomation','hub_enternewpartScheduledRun'].includes(t.getHandlerFunction())).map(t=>({handler:t.getHandlerFunction(),source:String(t.getEventType())}));
-            const journals=Object.keys(p.getProperties()).filter(k=>k.startsWith('ENP_ITEM_GROUP_MASTER_BRIDGE_R23_')).length;
-            return JSON.stringify({status:'AUDITED',config:config,triggers:triggers,openGroupJournals:journals});
-          }
-          JS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-      - name: Inspect report and restore source
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
-          grep -q 'status' probe.txt
+      - run: echo 'No operational action configured'
