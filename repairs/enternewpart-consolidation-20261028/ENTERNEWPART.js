@@ -3043,6 +3043,52 @@ function hub_previewEnternewpartAutomation() {
 }
 
 // Refresh and reconcile the live ENTERNEWPART report without moving stored rows.
+// Fill only missing plain cells when existing item or explicit product-family rules agree.
+function hub_enpEnrichmentPlan_(record,catalog,rules) {
+ const norm=v=>String(v==null?'':v).trim().toUpperCase();
+ const sku=norm(record['Item Number']), result={};
+ if(!sku)return result;
+ const matches=catalog.filter(x=>norm(x.ItemNumber)===sku && Number(x.Id)>0);
+ const ids=[...new Set(matches.map(x=>String(x.Id)))];
+ if(ids.length===1){
+  const same=matches.filter(x=>String(x.Id)===ids[0]);
+  const mappings={'Item Category':'ItemCategory','Preferred Vendor':'PreferredVendor','Manufacturer':'Manufacturer'};
+  Object.keys(mappings).forEach(k=>{
+   const vals=[...new Set(same.map(x=>String(x[mappings[k]]||'').trim()).filter(Boolean))];
+   if(vals.length===1 && !norm(record[k]))result[k]=vals[0];
+  });
+ }
+ if(!norm(record['Preferred Vendor'])&&!result['Preferred Vendor']){
+  const words=v=>norm(v).replace(/[^A-Z0-9]+/g,' ').trim();
+  const text=' '+words([record['Item Name'],record.Description,record['Original Description']].join(' '))+' ';
+  const suppliers=[...new Set(rules.filter(x=>words(x.family)&&text.indexOf(' '+words(x.family)+' ')>=0).map(x=>String(x.supplier||'').trim()).filter(Boolean))];
+  if(suppliers.length===1)result['Preferred Vendor']=suppliers[0];
+ }
+ return result;
+}
+function hub_enpEnrichReportRows_(sheet,activeRows) {
+ if(!activeRows.length)return 0;
+ const book=sheet.getParent(),catalogSheet=book.getSheetByName('DATA_ITEMS'),rulesSheet=book.getSheetByName('ENP_VENDOR_RULES');
+ if(!catalogSheet||!rulesSheet)return 0;
+ const records=catalogSheet.getDataRange().getValues(),head=records[0]||[],col={};head.forEach((k,i)=>col[k]=i);
+ if(['ItemNumber','Id','ItemCategory','PreferredVendor','Manufacturer'].some(k=>col[k]===undefined))return 0;
+ const catalog=records.slice(1).map(r=>({ItemNumber:r[col.ItemNumber],Id:r[col.Id],ItemCategory:r[col.ItemCategory],PreferredVendor:r[col.PreferredVendor],Manufacturer:r[col.Manufacturer]}));
+ const rg=rulesSheet.getDataRange().getValues(),rh=rg[0]||[],v=rh.indexOf('Supplier Name (Info!B)'),f=rh.indexOf('Product Family (Info!C)');
+ if(v<0||f<0)return 0;
+ const rules=rg.slice(1).map(r=>({supplier:r[v],family:r[f]})),grid=sheet.getDataRange().getValues(),headers=grid[0]||[],count=0;
+ for(const n of activeRows){
+  const record={};headers.forEach((k,i)=>{if(k)record[k]=(grid[n-1]||[])[i];});
+  if(['HOLD','PAUSED','DO NOT CREATE'].includes(String(record['Workflow Status']||'').trim().toUpperCase()))continue;
+  const plan=hub_enpEnrichmentPlan_(record,catalog,rules);
+  for(const key of Object.keys(plan)){
+   const i=headers.indexOf(key);if(i<0)continue;const cell=sheet.getRange(n,i+1);
+   if(cell.getFormula()||String(cell.getValue()||'').trim())continue;
+   cell.setValue(plan[key]).setNote('Filled from an unambiguous exact item match or explicit product-family vendor rule.');count++;
+  }
+ }
+ return count;
+}
+
 function hub_refreshEnternewpartReport() {
  const p=PropertiesService.getScriptProperties(),url=p.getProperty('HUB_ENP_REPORT_URL');
  if(!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(String(url||'')))throw new Error('ENTERNEWPART report URL is not configured');
@@ -3105,6 +3151,7 @@ function hub_refreshEnternewpartReport() {
    }
    if(rowStatus==='COMPLETED')completedStillInReport.push(row);else active.push(row);
   });
+  hub_enpEnrichReportRows_(sh,active);
   let filter=sh.getFilter();
   if(!filter){sh.getRange(1,1,sh.getMaxRows(),headers.length).createFilter();filter=sh.getFilter();}
   const range=filter.getRange();
