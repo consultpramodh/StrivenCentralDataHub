@@ -1,68 +1,10 @@
-name: Retry three current ENTERNEWPART lines
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  inspect:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up and prepare read-only schema probe
-        run: |
-          set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-          
-          function hub_probeInventoryReportSchema() {
-            const e=hub_row2LegacyEngine_(),out=[];
-            for(const sku of ['UKA 37/95/37/57','71540','1TLMXXX05-10']){
-              const res=e.enp_guardRawRequest_('POST','/v1/items/search',{ItemNumber:sku,PageIndex:0,PageSize:1000},false);
-              if(!res.ok)throw Error('Item search failed HTTP '+res.code);
-              const page=e.enp_legacySearchPage_(res.body);
-              if(page.rows.length>=1000 || (page.count!==null&&page.count>page.rows.length))throw Error('Search incomplete for '+sku);
-              const exact=page.rows.filter(x=>e.enp_guardUpper_(e.enp_guardItemNumber_(x))===sku);
-              out.push({sku:sku,matches:exact.map(x=>({id:e.enp_guardItemId_(x),name:e.enp_guardItemName_(x),active:x.active!=null?x.active:x.Active}))});
-            }
-            return JSON.stringify({status:'LIVE_LOOKUP',results:out});
-          }
-          JS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-      - name: Inspect report and restore source
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
-          grep -q 'status' probe.txt
+      - run: echo 'No operational action configured'
