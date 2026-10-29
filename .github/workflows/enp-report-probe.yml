@@ -1,4 +1,4 @@
-name: Process existing report item AC01349 once
+name: Correct existing item line description once
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -36,33 +36,19 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
 
           function hub_onceReuseExistingAc01349() {
-            const report=hub_refreshEnternewpartReport();
             const e=hub_row2LegacyEngine_(),sh=e.enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]);
-            const rows=report.activeRows.filter(n=>e.enp_guardUpper_(grid[n-1][h['Item Number']])==='AC01349'&&Number(grid[n-1][h['SO Internal ID']])===28139);
-            if(rows.length!==1)throw Error('Expected exactly one active report line');
-            const n=rows[0],r=grid[n-1], item=e.enp_legacyExactLookupNow_('AC01349');
-            if(!item||e.enp_guardItemId_(item)!==36602||e.enp_guardUpper_(e.enp_guardItemNumber_(item))!=='AC01349')throw Error('Exact live item identity mismatch');
+            const n=78,r=grid[n-1];if(e.enp_guardUpper_(r[h['Item Number']])!=='AC01349'||Number(r[h['SO Internal ID']])!==28139||Number(r[h['Striven Item ID']])!==36602)throw Error('Row identity changed');
+            const parsed=e.enp_parseDescription_(r[h['Original Description']]);if(e.enp_guardUpper_(parsed.itemNumber)!=='AC01349'||!parsed.name)throw Error('Original description unavailable');
             const so=e.enp_getSalesOrder_(28139),status=so.status||so.Status||{};
             if(e.enp_guardUpper_(status.name||status.Name)!=='QUOTED'||String(so.orderNumber||so.OrderNumber)!=='586404')throw Error('Order identity or status changed');
-            if(Number(r[h.Quantity])!==1||Number(r[h['SO Line Price']])!==350)throw Error('Report quantity or price changed');
             const target=e.enp_findTargetPlaceholderLine_(e.enp_getSalesOrderLineItems_(so),{desiredItemNumber:'AC01349',desiredQty:1,newItemId:36602});
-            if(!target)throw Error('Unique placeholder not found');
-            const qty=e.enp_verificationNumber_(target.qty!=null?target.qty:target.Qty!=null?target.Qty:target.quantity!=null?target.quantity:target.Quantity);
-            const price=e.enp_verificationNumber_(target.price!=null?target.price:target.Price);
+            if(!target||Number((target.item||target.Item||{}).id||(target.item||target.Item||{}).Id)!==36602)throw Error('Expected existing item line not found');
+            const lineId=e.enp_num_(target.id!=null?target.id:target.Id),qty=e.enp_verificationNumber_(target.qty!=null?target.qty:target.Qty),price=e.enp_verificationNumber_(target.price!=null?target.price:target.Price);
             if(qty!==1||price!==350)throw Error('Live line quantity or price changed');
-            sh.getRange(n,h['Striven Item ID']+1).setValue(36602);
-            try{
-              const result=e.enp_replaceSalesOrderItems_(28139,[{key:'HUB_ROW_'+n,lineId:e.enp_num_(target.id!=null?target.id:target.Id),desiredItemNumber:'AC01349',desiredItemName:'Intake valve to reduce airflow of 5’,',desiredPrice:350,desiredQty:1,newItemId:36602}]);
-              if(!result||result.blocked||!Array.isArray(result.replacements)||result.replacements.length!==1)throw Error('SO replacement not verified');
-              sh.getRange(n,h['Workflow Status']+1).setValue('COMPLETED');
-              sh.getRange(n,h['Review Reason']+1).setValue('Reused exact verified existing item 36602; SO 586404 quantity 1 and price 350 preserved; CF820 verified.');
-              const after=hub_refreshEnternewpartReport();
-              return JSON.stringify({status:'COMPLETED',itemId:36602,so:586404,row:n,reportRows:after.reportRows,stillActive:after.activeRows.includes(n),completedStillInReport:after.completedStillInReport});
-            }catch(err){
-              sh.getRange(n,h['Workflow Status']+1).setValue('ITEM READY — REPLACEMENT BLOCKED');
-              sh.getRange(n,h['Review Reason']+1).setValue(String(err.message||err));
-              return JSON.stringify({status:'BLOCKED',itemId:36602,row:n,reason:String(err.message||err)});
-            }
+            const result=e.enp_replaceSalesOrderItems_(28139,[{key:'HUB_ROW_'+n,lineId:lineId,desiredItemNumber:'AC01349',desiredItemName:parsed.name,desiredPrice:350,desiredQty:1,newItemId:36602}]);
+            if(!result||result.blocked||!Array.isArray(result.replacements)||result.replacements.length!==1)throw Error('Description correction not verified');
+            const after=hub_refreshEnternewpartReport();
+            return JSON.stringify({status:'DESCRIPTION_CORRECTED',lineId:lineId,reportRows:after.reportRows,completedStillInReport:after.completedStillInReport});
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
