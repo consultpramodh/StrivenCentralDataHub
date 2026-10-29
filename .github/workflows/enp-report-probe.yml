@@ -1,63 +1,10 @@
-name: Inspect inventory report schema safely
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  inspect:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up and prepare read-only schema probe
-        run: |
-          set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-          
-          function hub_probeInventoryReportSchema() {
-            const before=hub_refreshEnternewpartReport();
-            const remaining=before.activeRows.filter(n=>[76,77].includes(n));
-            const result=hub_row2LegacyEngine_().enp_hubRunEligibleRows_(remaining);
-            const after=hub_refreshEnternewpartReport();
-            return JSON.stringify({status:'RESULT',worker:result,reportRows:after.reportRows,activeRows:after.activeRows,completedStillInReport:after.completedStillInReport});
-          }
-          JS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-      - name: Inspect report and restore source
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
-          grep -q 'status' probe.txt
+      - run: echo 'No operational action configured'
