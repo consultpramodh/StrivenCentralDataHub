@@ -558,6 +558,7 @@ function enp_buildItemPayloadFromSheetRow_(row,col) {
 
 function enp_legacyHydrateReferences_(record,base) {
   const fields={ItemType:['itemType','Inventory','ItemType'],DefaultInventoryLocation:['defaultInventoryLocation',record['Location Name'],'LocationName'],Category:['category',record['Item Category'],'ItemCategory'],PreferredVendor:['preferredVendor',record['Preferred Vendor'],'PreferredVendor'],Manufacturer:['manufacturer',record.Manufacturer,'Manufacturer']};
+  if(!enp_guardNorm_(record['Preferred Vendor']))delete fields.PreferredVendor;
   const props=PropertiesService.getScriptProperties(),raw=props.getProperty('ENTERNEWPART_HUB_REFERENCE_IDS');
   const registry=raw?JSON.parse(raw):{},sheet=enp_guardHubBook_().getSheetByName('DATA_ITEMS');
   if(!sheet)throw new Error('DATA_ITEMS cache missing; cannot select live reference witnesses');
@@ -1486,7 +1487,7 @@ function enp_hubCanOmitCost_(record) {
  const blank=v=>v==null||String(v).trim()==='';
  if(!blank(record.Cost)||!blank(record.Discount))return false;
  const vendor=enp_guardUpper_(record['Preferred Vendor']);
- if(!vendor)return false;
+ if(!vendor)return true;
  const sheet=enp_guardHubBook_().getSheetByName('ENP_VENDOR_RULES');
  if(!sheet)throw new Error('Vendor rules unavailable; cannot determine whether cost can be omitted');
  const rows=sheet.getDataRange().getValues(), h=enp_indexByHeader_(rows[0]);
@@ -1510,11 +1511,10 @@ function enp_hubPlanRow_(grid,rowNumber) {
  const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost);
  if(price===null||price<0||(cost!==null&&cost<0))throw new Error('Nonnegative catalog Price and Cost required');
  const costOmitted=cost===null;
- if(costOmitted&&!enp_guardNorm_(r['Preferred Vendor']))throw new Error('Missing Preferred Vendor');
  if(costOmitted&&!enp_hubCanOmitCost_(r))throw new Error('Catalog Cost missing but a matching vendor discount exists or cost is invalid');
  if(r.Currency!=='CAD')throw new Error('Only verified CAD base currency is supported');
  if(r['Location Name']!=='60 - WAREHOUSE (Ajax)'||r['Item Type']!=='Inventory'||enp_guardUpper_(r.Taxable)!=='YES')throw new Error('Fixed location, taxable or item type differs');
- ['Item Category','Preferred Vendor','Manufacturer','Manufacturer Part#','Serial Number Tracking'].forEach(function(h){if(!enp_guardNorm_(r[h]))throw new Error('Missing '+h);});
+ ['Item Category','Manufacturer','Manufacturer Part#','Serial Number Tracking'].forEach(function(h){if(!enp_guardNorm_(r[h]))throw new Error('Missing '+h);});
  if(enp_guardUpper_(r['Manufacturer Part#'])!==enp_guardUpper_(sku))throw new Error('Manufacturer Part# must equal Item Number');
  if(enp_guardUpper_(r['Serial Number Tracking'])!=='NO')throw new Error('Serial tracking YES requires a verified API write path; review required');
  if(r['MAP Price']!=null&&r['MAP Price']!=='')throw new Error('MAP Price requires a verified API write path; review required');
@@ -1770,10 +1770,11 @@ function enp_guardHubPayloadFromRecord_(base, record, registry) {
     ItemType:enp_guardHubReference_(registry,'ItemType','Inventory'),
     DefaultInventoryLocation:enp_guardHubReference_(registry,'DefaultInventoryLocation','60 - WAREHOUSE (Ajax)'),
     Category:enp_guardHubReference_(registry,'Category',r['Item Category']),
-    PreferredVendor:enp_guardHubReference_(registry,'PreferredVendor',r['Preferred Vendor']),
     Manufacturer:enp_guardHubReference_(registry,'Manufacturer',r.Manufacturer),
     ManufacturePartNumber:enp_guardNorm_(r['Manufacturer Part#'])
   });
+  if (enp_guardNorm_(r['Preferred Vendor'])) payload.PreferredVendor=enp_guardHubReference_(registry,'PreferredVendor',r['Preferred Vendor']);
+  else delete payload.PreferredVendor;
   if (cost === null) delete payload.Cost; else payload.Cost=cost;
   if (!payload.ManufacturePartNumber) throw new Error('HUB_METADATA_BLOCKED: Manufacturer Part# is required.');
   if (r.UPC != null && r.UPC !== '') {
