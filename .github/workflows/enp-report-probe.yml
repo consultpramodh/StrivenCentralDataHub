@@ -39,7 +39,7 @@ jobs:
             const p=PropertiesService.getScriptProperties(),url=p.getProperty('HUB_ENP_REPORT_URL'),token=hub_strivenAccessToken_(p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID'),p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
             const res=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false}),code=res.getResponseCode();
             if(code!==200)return JSON.stringify({status:'HTTP_ERROR',code:code});
-            const obj=JSON.parse(res.getContentText()),shape=Array.isArray(obj)?{type:'array',length:obj.length}:Object.fromEntries(Object.keys(obj).map(k=>[k,Array.isArray(obj[k])?{type:'array',length:obj[k].length}:obj[k]===null?null:(typeof obj[k]==='number'||typeof obj[k]==='boolean'?obj[k]:typeof obj[k])]));
+            const obj=JSON.parse(res.getContentText());if(typeof obj==='string')return JSON.stringify({status:'REPORT_STRING',value:obj.slice(0,100)});const shape=Array.isArray(obj)?{type:'array',length:obj.length}:Object.fromEntries(Object.keys(obj).map(k=>[k,Array.isArray(obj[k])?{type:'array',length:obj[k].length}:obj[k]===null?null:(typeof obj[k]==='number'||typeof obj[k]==='boolean'?obj[k]:typeof obj[k])]));
             return JSON.stringify({status:'REPORT_SHAPE',shape:shape});
           }
           JS
