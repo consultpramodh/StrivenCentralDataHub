@@ -1,4 +1,4 @@
-name: Inspect inventory report schema safely
+name: Inspect bridge mismatch during guarded retry
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -36,11 +36,21 @@ jobs:
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
           
           function hub_probeInventoryReportSchema() {
-            const e=hub_row2LegacyEngine_(),so=e.enp_getSalesOrder_(28132),lines=e.enp_getSalesOrderLineItems_(so),plans=e.enp_prepareItemGroupMasterBridgePlans_(28132,lines,{});
-            const p=PropertiesService.getScriptProperties(),journal=Object.keys(p.getProperties()).filter(k=>k.indexOf('ENP_ITEM_GROUP_MASTER_BRIDGE_R23_')===0);
-            return JSON.stringify({status:'BRIDGE_DIAGNOSTIC',plans:plans.map(x=>({id:x.parentItemId,original:JSON.parse(x.originalSignature),desired:JSON.parse(x.desiredSignature)})),journalKeys:journal});
+            const report=hub_refreshEnternewpartReport();
+            if(!report.activeRows.includes(69))return JSON.stringify({status:'NO_LONGER_ACTIVE'});
+            const out=hub_row2LegacyEngine_().enp_hubRunEligibleRows_([69]);
+            return JSON.stringify({status:'DIAGNOSTIC_RUN',result:out});
           }
           JS
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('WORK/src/ENTERNEWPART.js')
+          s=p.read_text()
+          old="label + ': Item Group child configuration did not read back as expected.'"
+          new="label + ': Item Group child configuration did not read back as expected. LIVE=' + enp_itemGroupDefinitionSignature_(liveGroups) + ' EXPECTED=' + enp_itemGroupDefinitionSignature_(expectedGroups)"
+          if s.count(old)!=1: raise SystemExit('Expected verification guard not found exactly once')
+          p.write_text(s.replace(old,new))
+          PY
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
           diff -qr PRE/src FRESH/src
