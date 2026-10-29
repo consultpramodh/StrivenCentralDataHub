@@ -1,10 +1,33 @@
-name: ENTERNEWPART probe placeholder
+name: Run ENTERNEWPART automation once
 on:
-  workflow_dispatch:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
   contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
 jobs:
-  placeholder:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo 'No operational action configured'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          mkdir -p HUB
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > HUB/.clasp.json
+      - name: Run existing automation
+        run: |
+          set -euo pipefail
+          clasp run hub_processEnternewpartAutomation --project HUB | tee result.txt
+          grep -q 'status' result.txt
