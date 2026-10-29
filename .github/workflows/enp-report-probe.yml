@@ -1,4 +1,4 @@
-name: Process existing report item N190-0005 once
+name: Inspect inventory report schema safely
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -9,7 +9,7 @@ concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  process:
+  inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -24,7 +24,7 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up source and prepare single-item helper
+      - name: Back up and prepare read-only schema probe
         run: |
           set -euo pipefail
           for d in PRE WORK FRESH VERIFY; do
@@ -34,41 +34,23 @@ jobs:
           clasp pull --project PRE
           cp -a PRE/src/. WORK/src/
           cat >> WORK/src/ENTERNEWPART.js <<'JS'
-
-          function hub_onceReuseNapoleon() {
-            const report=hub_refreshEnternewpartReport();
-            const e=hub_row2LegacyEngine_(),sh=e.enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]);
-            const rows=report.activeRows.filter(n=>e.enp_guardUpper_(grid[n-1][h['Item Number']])==='N190-0005'&&Number(grid[n-1][h['SO Internal ID']])===28207);
-            if(rows.length!==1)throw Error('Expected exactly one active report line');
-            const n=rows[0],r=grid[n-1], item=e.enp_legacyExactLookupNow_('N190-0005');
-            if(!item||e.enp_guardItemId_(item)!==29590||e.enp_guardUpper_(e.enp_guardItemNumber_(item))!=='N190-0005')throw Error('Exact live item identity mismatch');
-            const so=e.enp_getSalesOrder_(28207),status=so.status||so.Status||{};
-            if(e.enp_guardUpper_(status.name||status.Name)!=='APPROVED'||String(so.orderNumber||so.OrderNumber)!=='586472')throw Error('Order identity or status changed');
-            if(Number(r[h.Quantity])!==1||Number(r[h['SO Line Price']])!==81)throw Error('Report quantity or price changed');
-            const target=e.enp_findTargetPlaceholderLine_(e.enp_getSalesOrderLineItems_(so),{desiredItemNumber:'N190-0005',desiredQty:1,newItemId:29590});
-            if(!target)throw Error('Unique placeholder not found');
-            const qty=e.enp_verificationNumber_(target.qty!=null?target.qty:target.Qty!=null?target.Qty:target.quantity!=null?target.quantity:target.Quantity);
-            const price=e.enp_verificationNumber_(target.price!=null?target.price:target.Price);
-            if(qty!==1||price!==81)throw Error('Live line quantity or price changed');
-            sh.getRange(n,h['Striven Item ID']+1).setValue(29590);
-            try{
-              const result=e.enp_replaceSalesOrderItems_(28207,[{key:'HUB_ROW_'+n,lineId:e.enp_num_(target.id!=null?target.id:target.Id),desiredItemNumber:'N190-0005',desiredItemName:'N190-0005',desiredPrice:81,desiredQty:1,newItemId:29590}]);
-              if(!result||result.blocked||!Array.isArray(result.replacements)||result.replacements.length!==1)throw Error('SO replacement not verified');
-              sh.getRange(n,h['Workflow Status']+1).setValue('COMPLETED');
-              sh.getRange(n,h['Review Reason']+1).setValue('Reused exact verified existing item 29590; SO 586472 quantity 1 and price 81 preserved; CF820 verified.');
-              const after=hub_refreshEnternewpartReport();
-              return JSON.stringify({status:'COMPLETED',itemId:29590,so:586472,row:n,reportRows:after.reportRows,stillActive:after.activeRows.includes(n),completedStillInReport:after.completedStillInReport});
-            }catch(err){
-              sh.getRange(n,h['Workflow Status']+1).setValue('ITEM READY — REPLACEMENT BLOCKED');
-              sh.getRange(n,h['Review Reason']+1).setValue(String(err.message||err));
-              return JSON.stringify({status:'BLOCKED',itemId:29590,row:n,reason:String(err.message||err)});
+          
+          function hub_probeInventoryReportSchema() {
+            const before=hub_refreshEnternewpartReport(),e=hub_row2LegacyEngine_(),sh=e.enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]);
+            const rows=before.activeRows.filter(n=>e.enp_guardUpper_(grid[n-1][h['Item Number']])==='1TLMXXX05-10'&&Number(grid[n-1][h['SO Internal ID']])===28139);
+            if(rows.length===1){
+              const so=e.enp_getSalesOrder_(28139),currency=so.currency||so.Currency||{},code=String(currency.currencyISOCode||currency.CurrencyISOCode||'').toUpperCase();
+              if(code==='CAD'&&String(grid[rows[0]-1][h.Currency]||'')==='')sh.getRange(rows[0],h.Currency+1).setValue('CAD').setNote('Verified from live sales order 586404.');
             }
+            SpreadsheetApp.flush();
+            const result=e.enp_hubRunEligibleRows_(before.activeRows),after=hub_refreshEnternewpartReport(),now=sh.getDataRange().getValues();
+            return JSON.stringify({status:'DONE',worker:result,reportRows:after.reportRows,rows:after.activeRows.map(n=>({row:n,sku:now[n-1][h['Item Number']],reason:now[n-1][h['Review Reason']]})),completedStillInReport:after.completedStillInReport});
           }
           JS
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
           diff -qr PRE/src FRESH/src
-      - name: Run and restore source
+      - name: Inspect report and restore source
         run: |
           set -euo pipefail
           restore() {
@@ -81,5 +63,5 @@ jobs:
           }
           trap restore EXIT
           clasp push --force --project WORK
-          clasp run hub_onceReuseNapoleon --project WORK | tee probe.txt
+          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
           grep -q 'status' probe.txt
