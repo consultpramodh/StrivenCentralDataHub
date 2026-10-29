@@ -559,6 +559,7 @@ function enp_buildItemPayloadFromSheetRow_(row,col) {
 function enp_legacyHydrateReferences_(record,base) {
   const fields={ItemType:['itemType','Inventory','ItemType'],DefaultInventoryLocation:['defaultInventoryLocation',record['Location Name'],'LocationName'],Category:['category',record['Item Category'],'ItemCategory'],PreferredVendor:['preferredVendor',record['Preferred Vendor'],'PreferredVendor'],Manufacturer:['manufacturer',record.Manufacturer,'Manufacturer']};
   if(!enp_guardNorm_(record['Preferred Vendor']))delete fields.PreferredVendor;
+  if(!enp_guardNorm_(record.Manufacturer))delete fields.Manufacturer;
   const props=PropertiesService.getScriptProperties(),raw=props.getProperty('ENTERNEWPART_HUB_REFERENCE_IDS');
   const registry=raw?JSON.parse(raw):{},sheet=enp_guardHubBook_().getSheetByName('DATA_ITEMS');
   if(!sheet)throw new Error('DATA_ITEMS cache missing; cannot select live reference witnesses');
@@ -1514,7 +1515,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
  if(costOmitted&&!enp_hubCanOmitCost_(r))throw new Error('Catalog Cost missing but a matching vendor discount exists or cost is invalid');
  if(r.Currency!=='CAD')throw new Error('Only verified CAD base currency is supported');
  if(r['Location Name']!=='60 - WAREHOUSE (Ajax)'||r['Item Type']!=='Inventory'||enp_guardUpper_(r.Taxable)!=='YES')throw new Error('Fixed location, taxable or item type differs');
- ['Item Category','Manufacturer','Manufacturer Part#','Serial Number Tracking'].forEach(function(h){if(!enp_guardNorm_(r[h]))throw new Error('Missing '+h);});
+ ['Item Category','Manufacturer Part#','Serial Number Tracking'].forEach(function(h){if(!enp_guardNorm_(r[h]))throw new Error('Missing '+h);});
  if(enp_guardUpper_(r['Manufacturer Part#'])!==enp_guardUpper_(sku))throw new Error('Manufacturer Part# must equal Item Number');
  if(enp_guardUpper_(r['Serial Number Tracking'])!=='NO')throw new Error('Serial tracking YES requires a verified API write path; review required');
  if(r['MAP Price']!=null&&r['MAP Price']!=='')throw new Error('MAP Price requires a verified API write path; review required');
@@ -1770,9 +1771,10 @@ function enp_guardHubPayloadFromRecord_(base, record, registry) {
     ItemType:enp_guardHubReference_(registry,'ItemType','Inventory'),
     DefaultInventoryLocation:enp_guardHubReference_(registry,'DefaultInventoryLocation','60 - WAREHOUSE (Ajax)'),
     Category:enp_guardHubReference_(registry,'Category',r['Item Category']),
-    Manufacturer:enp_guardHubReference_(registry,'Manufacturer',r.Manufacturer),
     ManufacturePartNumber:enp_guardNorm_(r['Manufacturer Part#'])
   });
+  if (enp_guardNorm_(r.Manufacturer)) payload.Manufacturer=enp_guardHubReference_(registry,'Manufacturer',r.Manufacturer);
+  else delete payload.Manufacturer;
   if (enp_guardNorm_(r['Preferred Vendor'])) payload.PreferredVendor=enp_guardHubReference_(registry,'PreferredVendor',r['Preferred Vendor']);
   else delete payload.PreferredVendor;
   if (cost === null) delete payload.Cost; else payload.Cost=cost;
