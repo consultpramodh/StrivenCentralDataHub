@@ -3101,7 +3101,9 @@ function hub_refreshEnternewpartReport() {
  if(!cid||!secret)throw new Error('Striven credentials missing');
  const response=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+hub_strivenAccessToken_(cid,secret).accessToken,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false});
  if(response.getResponseCode()!==200)throw new Error('ENTERNEWPART report HTTP '+response.getResponseCode());
- const body=JSON.parse(response.getContentText()),arrays=Array.isArray(body)?[body]:['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]);
+ const parsedBody=JSON.parse(response.getContentText());
+ const body=parsedBody==='No records found.'?[]:parsedBody;
+ const arrays=Array.isArray(body)?[body]:body&&typeof body==='object'?['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]):[];
  if(arrays.length!==1)throw new Error('Unrecognized ENTERNEWPART report response');
  const source=arrays[0],lock=LockService.getScriptLock();lock.waitLock(30000);
  try {
