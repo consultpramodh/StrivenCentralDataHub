@@ -26,8 +26,8 @@ jobs:
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
           mkdir -p HUB
           printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > HUB/.clasp.json
-      - name: Run existing automation
+      - name: Refresh report after replacements
         run: |
           set -euo pipefail
-          clasp run hub_processEnternewpartAutomation --project HUB | tee result.txt
+          clasp run hub_refreshEnternewpartReport --project HUB | tee result.txt
           grep -q 'status' result.txt
