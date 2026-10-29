@@ -1,10 +1,65 @@
-name: ENTERNEWPART probe placeholder
+name: Retry three current ENTERNEWPART lines
 on:
-  workflow_dispatch:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
   contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
 jobs:
-  placeholder:
+  inspect:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo 'No operational action configured'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Back up and prepare read-only schema probe
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH VERIFY; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          cp -a PRE/src/. WORK/src/
+          cat >> WORK/src/ENTERNEWPART.js <<'JS'
+          
+          function hub_probeInventoryReportSchema() {
+            const before=hub_refreshEnternewpartReport();
+            const e=hub_row2LegacyEngine_(),sh=e.enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]),wanted=['UKA 37/95/37/57','71540','1TLMXXX05-10'];
+            const rows=before.activeRows.filter(n=>wanted.includes(e.enp_guardUpper_(grid[n-1][h['Item Number']])));
+            const run=e.enp_hubRunEligibleRows_(rows);
+            const after=hub_refreshEnternewpartReport(),newGrid=sh.getDataRange().getValues();
+            const status=rows.map(n=>({row:n,sku:newGrid[n-1][h['Item Number']],status:newGrid[n-1][h['Workflow Status']],reason:newGrid[n-1][h['Review Reason']],itemId:newGrid[n-1][h['Striven Item ID']],stillInReport:after.activeRows.includes(n)||after.completedStillInReport.includes(n)}));
+            return JSON.stringify({status:'DONE',reportRows:after.reportRows,rows:status,worker:run,completedStillInReport:after.completedStillInReport});
+          }
+          JS
+          node --check WORK/src/ENTERNEWPART.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - name: Inspect report and restore source
+        run: |
+          set -euo pipefail
+          restore() {
+            trap - EXIT
+            clasp pull --project VERIFY
+            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
+            clasp push --force --project PRE
+            clasp pull --project VERIFY
+            diff -qr PRE/src VERIFY/src
+          }
+          trap restore EXIT
+          clasp push --force --project WORK
+          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
+          grep -q 'status' probe.txt
