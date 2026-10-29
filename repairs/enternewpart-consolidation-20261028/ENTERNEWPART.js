@@ -3076,7 +3076,8 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  const catalog=records.slice(1).map(r=>({ItemNumber:r[col.ItemNumber],Id:r[col.Id],ItemCategory:r[col.ItemCategory],PreferredVendor:r[col.PreferredVendor],Manufacturer:r[col.Manufacturer]}));
  const rg=rulesSheet.getDataRange().getValues(),rh=rg[0]||[],v=rh.indexOf('Supplier Name (Info!B)'),f=rh.indexOf('Product Family (Info!C)');
  if(v<0||f<0)return 0;
- const rules=rg.slice(1).map(r=>({supplier:r[v],family:r[f]})),grid=sheet.getDataRange().getValues(),headers=grid[0]||[],count=0;
+ const rules=rg.slice(1).map(r=>({supplier:r[v],family:r[f]})),grid=sheet.getDataRange().getValues(),headers=grid[0]||[];
+ let count=0;
  for(const n of activeRows){
   const record={};headers.forEach((k,i)=>{if(k)record[k]=(grid[n-1]||[])[i];});
   if(['HOLD','PAUSED','DO NOT CREATE'].includes(String(record['Workflow Status']||'').trim().toUpperCase()))continue;
