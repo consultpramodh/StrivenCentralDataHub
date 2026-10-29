@@ -1,4 +1,4 @@
-name: Inspect inventory report schema safely
+name: Deploy empty report response fix
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -9,10 +9,13 @@ concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  inspect:
+  deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -24,7 +27,7 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Back up and prepare read-only schema probe
+      - name: Compare live source and deploy bridge fix
         run: |
           set -euo pipefail
           for d in PRE WORK FRESH VERIFY; do
@@ -32,32 +35,16 @@ jobs:
             printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
           done
           clasp pull --project PRE
+          git show 7c9bb287d4ca6caeb6f8c45469a3240e4816ce5b > expected.js
+          cmp expected.js PRE/src/ENTERNEWPART.js || { echo 'Live source differs from reviewed baseline; stopped'; exit 1; }
           cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'JS'
-          
-          function hub_probeInventoryReportSchema() {
-            const p=PropertiesService.getScriptProperties(),url=p.getProperty('HUB_ENP_REPORT_URL'),token=hub_strivenAccessToken_(p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID'),p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET')).accessToken;
-            const res=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+token,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false}),code=res.getResponseCode();
-            if(code!==200)return JSON.stringify({status:'HTTP_ERROR',code:code});
-            const obj=JSON.parse(res.getContentText());if(typeof obj==='string')return JSON.stringify({status:'REPORT_STRING',value:obj.slice(0,100)});const shape=Array.isArray(obj)?{type:'array',length:obj.length}:Object.fromEntries(Object.keys(obj).map(k=>[k,Array.isArray(obj[k])?{type:'array',length:obj[k].length}:obj[k]===null?null:(typeof obj[k]==='number'||typeof obj[k]==='boolean'?obj[k]:typeof obj[k])]));
-            return JSON.stringify({status:'REPORT_SHAPE',shape:shape});
-          }
-          JS
+          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
           node --check WORK/src/ENTERNEWPART.js
           clasp pull --project FRESH
           diff -qr PRE/src FRESH/src
-      - name: Inspect report and restore source
-        run: |
-          set -euo pipefail
-          restore() {
-            trap - EXIT
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
-            clasp push --force --project PRE
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
           clasp push --force --project WORK
-          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
-          grep -q 'status' probe.txt
+          clasp pull --project VERIFY
+          diff -qr WORK/src VERIFY/src
+          echo 'DEPLOYED_VERIFIED'
+          clasp run hub_refreshEnternewpartReport --project WORK | tee result.txt
+          grep -q REFRESHED result.txt
