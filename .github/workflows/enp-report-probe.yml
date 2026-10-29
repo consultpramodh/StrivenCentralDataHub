@@ -47,6 +47,7 @@ jobs:
               before.activeRows.forEach(function(n){
                 const state=String(sh.getRange(n,status+1).getValue()).toUpperCase();
                 if(['HOLD','PAUSED','DO NOT CREATE'].includes(state))return;
+                [['Location Name','60 - WAREHOUSE (Ajax)'],['Taxable','Yes'],['Item Type','Inventory']].forEach(function(pair){const col=h.indexOf(pair[0]);if(col<0)throw Error('Required header missing');const cell=sh.getRange(n,col+1);const value=cell.getValue();if(value===''||value==null)cell.setValue(pair[1]);});
                 const cell=sh.getRange(n,ix+1);
                 cell.setValue('NO').setNote('2026-10-29: User instructed serial tracking NO for current ENTERNEWPART report items.');
               });
