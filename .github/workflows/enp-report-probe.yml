@@ -1,10 +1,74 @@
-name: ENTERNEWPART probe placeholder
+name: Inspect inventory report schema safely
 on:
-  workflow_dispatch:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
   contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
 jobs:
-  placeholder:
+  inspect:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo 'No operational action configured'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Back up and prepare read-only schema probe
+        run: |
+          set -euo pipefail
+          for d in PRE WORK FRESH VERIFY; do
+            mkdir -p "$d/src"
+            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          done
+          clasp pull --project PRE
+          cp -a PRE/src/. WORK/src/
+          cat >> WORK/src/ENTERNEWPART.js <<'JS'
+          
+          function hub_probeInventoryReportSchema() {
+            const before=hub_refreshEnternewpartReport(),e=hub_row2LegacyEngine_(),book=e.enp_guardHubBook_(),sh=book.getSheetByName('ENTERNEWPART'),grid=sh.getDataRange().getValues(),h=e.enp_indexByHeader_(grid[0]);
+            const rows=before.activeRows.filter(n=>e.enp_guardUpper_(grid[n-1][h['Item Number']])==='N010-0972'&&Number(grid[n-1][h['SO Internal ID']])===28226);
+            if(rows.length!==1)throw Error('Expected one active exact report row');
+            const n=rows[0],r=grid[n-1],so=e.enp_getSalesOrder_(28226),status=so.status||so.Status||{},currency=so.currency||so.Currency||{};
+            if(e.enp_guardUpper_(status.name||status.Name)!=='APPROVED'||String(so.orderNumber||so.OrderNumber)!=='586491'||String(currency.currencyISOCode||currency.CurrencyISOCode).toUpperCase()!=='CAD')throw Error('Live order status, identity or currency changed');
+            const w=e.enp_legacyLiveItem_(29533),v=w.preferredVendor||w.PreferredVendor||{},m=w.manufacturer||w.Manufacturer||{};
+            if(e.enp_guardUpper_(v.name||v.Name)!=='WOLF STEEL LTD.'||e.enp_guardUpper_(m.name||m.Name)!=='WOLF STEEL LTD.')throw Error('Catalog supplier witness changed');
+            const rules=book.getSheetByName('ENP_VENDOR_RULES').getDataRange().getValues(),match=rules.slice(1).filter(x=>e.enp_guardUpper_(x[1])==='WOLF STEEL LTD.'&&e.enp_guardUpper_(x[2])==='BBQ ACCESSORIES');
+            if(match.length!==1||Number(match[0][3])!==0.5)throw Error('Vendor discount rule changed or ambiguous');
+            const vals={'Item Category':'BBQ - Accessories','Preferred Vendor':'Wolf Steel Ltd.','Manufacturer':'Wolf Steel Ltd.','Currency':'CAD','Discount':0.5};
+            for(const k of Object.keys(vals)){if(h[k]==null)throw Error('Missing header '+k);if(r[h[k]]!==''&&r[h[k]]!=null&&String(r[h[k]])!==String(vals[k]))throw Error('Conflicting '+k);}
+            for(const k of Object.keys(vals)){const cell=sh.getRange(n,h[k]+1);if(!String(r[h[k]]||'').trim())cell.setValue(vals[k]).setNote(k==='Currency'?'Verified against live SO 586491.':'Napoleon official parts manual and existing related Striven item 29533; discount from ENP_VENDOR_RULES.');}
+            SpreadsheetApp.flush();
+            const out=e.enp_hubRunEligibleRows_([n]);
+            const after=hub_refreshEnternewpartReport();
+            return JSON.stringify({status:'DONE',row:n,result:out,reportRows:after.reportRows,activeRows:after.activeRows,completedStillInReport:after.completedStillInReport});
+          }
+          JS
+          node --check WORK/src/ENTERNEWPART.js
+          clasp pull --project FRESH
+          diff -qr PRE/src FRESH/src
+      - name: Inspect report and restore source
+        run: |
+          set -euo pipefail
+          restore() {
+            trap - EXIT
+            clasp pull --project VERIFY
+            diff -qr WORK/src VERIFY/src || { echo 'Live source changed; refusing overwrite'; return 1; }
+            clasp push --force --project PRE
+            clasp pull --project VERIFY
+            diff -qr PRE/src VERIFY/src
+          }
+          trap restore EXIT
+          clasp push --force --project WORK
+          clasp run hub_probeInventoryReportSchema --project WORK | tee probe.txt
+          grep -q 'status' probe.txt
