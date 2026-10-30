@@ -3182,7 +3182,7 @@ function hub_processEnternewpartAutomation(event) {
  const result=hub_runEnternewpartReportWorker_();Logger.log(JSON.stringify(result));return result;
 }
 function hub_nextEnternewpartRun_(now) {
- const zone='America/Toronto',hours=[8,10,12,14,16,18],day=Utilities.formatDate(now,zone,'yyyy-MM-dd').split('-').map(Number);
+ const zone='America/Toronto',hours=[10,14,16],day=Utilities.formatDate(now,zone,'yyyy-MM-dd').split('-').map(Number);
  for(let delta=0;delta<3;delta++)for(const hour of hours){
   const guess=Date.UTC(day[0],day[1]-1,day[2]+delta,hour,0,0);
   const offset=Utilities.formatDate(new Date(guess),zone,'Z'),match=/^([+-])(\d{2})(\d{2})$/.exec(offset);
@@ -3206,29 +3206,25 @@ function hub_scheduleNextEnternewpartRun_(now) {
   const verified=ScriptApp.getProjectTriggers().filter(function(t){return t.getHandlerFunction()==='hub_enternewpartScheduledRun';});
   if(verified.length!==1||verified[0].getUniqueId()!==id)throw new Error('Automatic worker timer failed verification');
   PropertiesService.getScriptProperties().setProperty('HUB_ENP_NEXT_RUN_AT',next.toISOString());
-  return {nextRunUTC:next.toISOString(),nextRunLocal:Utilities.formatDate(next,'America/Toronto','yyyy-MM-dd HH:mm'),timezone:'America/Toronto',hours:[8,10,12,14,16,18]};
+  return {nextRunUTC:next.toISOString(),nextRunLocal:Utilities.formatDate(next,'America/Toronto','yyyy-MM-dd HH:mm'),timezone:'America/Toronto',hours:[10,14,16]};
  }finally{lock.releaseLock();}
 }
 function hub_enternewpartScheduledRun() {
  const props=PropertiesService.getScriptProperties();
  if(props.getProperty('HUB_ENP_AUTOMATION_ENABLED')==='false')return {status:'PAUSED',processed:0};
+ const now=new Date(),due=Date.parse(props.getProperty('HUB_ENP_NEXT_RUN_AT')||'');
+ // Re-arm before business work so a failed row does not stop future runs.
+ const next=hub_scheduleNextEnternewpartRun_(now);
+ if(!Number.isFinite(due)||now.getTime()<due-1000||now.getTime()-due>60*60*1000){
+  const out={status:'RESCHEDULED',processed:0,next:next};Logger.log(JSON.stringify(out));return out;
+ }
  const result=hub_runEnternewpartReportWorker_();Logger.log(JSON.stringify(result));return result;
 }
 function hub_enableEnternewpartAutomation() {
- const lock=LockService.getScriptLock();lock.waitLock(30000);
- try{
-  const props=PropertiesService.getScriptProperties(),old=ScriptApp.getProjectTriggers().filter(t=>['hub_processEnternewpartAutomation','hub_enternewpartScheduledRun'].includes(t.getHandlerFunction()));
-  const created=ScriptApp.newTrigger('hub_enternewpartScheduledRun').timeBased().everyMinutes(5).create();
-  if(!created||!created.getUniqueId())throw Error('Recurring timer creation failed');
-  const id=created.getUniqueId();
-  old.forEach(t=>{if(t.getUniqueId()!==id)ScriptApp.deleteTrigger(t);});
-  const verified=ScriptApp.getProjectTriggers().filter(t=>['hub_processEnternewpartAutomation','hub_enternewpartScheduledRun'].includes(t.getHandlerFunction()));
-  if(verified.length!==1||verified[0].getUniqueId()!==id)throw Error('Recurring timer verification failed');
-  props.deleteProperty('HUB_ENP_NEXT_RUN_AT');
-  props.setProperty('HUB_ENP_AUTOMATION_ENABLED','true');
-  const result={status:'INSTALLED',schedule:'every 5 minutes',timezone:'America/Toronto',maxExecutionWorkMillis:180000,mode:'AUTO_VALIDATED'};
-  Logger.log(JSON.stringify(result));return result;
- }finally{lock.releaseLock();}
+ const props=PropertiesService.getScriptProperties(),next=hub_scheduleNextEnternewpartRun_(new Date());
+ props.setProperty('HUB_ENP_AUTOMATION_ENABLED','true');
+ const preview=hub_previewEnternewpartAutomation(),result={status:'INSTALLED',schedule:next,maxExecutionWorkMillis:180000,eligible:preview.eligible,completed:preview.completed,review:preview.review||0,held:preview.held||0,mode:'AUTO_VALIDATED'};
+ Logger.log(JSON.stringify(result));return result;
 }
 function hub_pauseEnternewpartAutomation() {
  PropertiesService.getScriptProperties().setProperty('HUB_ENP_AUTOMATION_ENABLED','false');
