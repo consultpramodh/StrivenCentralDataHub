@@ -3080,9 +3080,28 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  if(v<0||f<0)return 0;
  const rules=rg.slice(1).map(r=>({supplier:r[v],family:r[f]})),grid=sheet.getDataRange().getValues(),headers=grid[0]||[];
  let count=0;
+ const orderCache={},engine=hub_row2LegacyEngine_();
  for(const n of activeRows){
   const record={};headers.forEach((k,i)=>{if(k)record[k]=(grid[n-1]||[])[i];});
   if(['HOLD','PAUSED','DO NOT CREATE'].includes(String(record['Workflow Status']||'').trim().toUpperCase()))continue;
+  // An order's currency is authoritative. Cache each lookup for this refresh.
+  if(!String(record.Currency||'').trim() && headers.includes('Currency')){
+   const soId=Number(record['SO Internal ID']),orderNo=String(record['Sales Order Number']||'').trim();
+   const source=String(record.Source||'').trim().toUpperCase();
+   if(Number.isSafeInteger(soId)&&soId>0&&orderNo&&['APPROVED','QUOTED'].includes(source)){
+    try{
+     if(!Object.prototype.hasOwnProperty.call(orderCache,soId))orderCache[soId]=engine.enp_getSalesOrder_(soId);
+     const so=orderCache[soId],state=so.status||so.Status||{},currency=so.currency||so.Currency||{};
+     const status=String(state.name||state.Name||'').trim().toUpperCase();
+     const number=String(so.orderNumber!=null?so.orderNumber:so.OrderNumber||'').trim();
+     const code=String(currency.currencyISOCode||currency.CurrencyISOCode||'').trim().toUpperCase();
+     const cell=sheet.getRange(n,headers.indexOf('Currency')+1);
+     if(status===source&&number===orderNo&&code==='CAD'&&!cell.getFormula()&&!String(cell.getValue()||'').trim()){
+      cell.setValue('CAD').setNote('Currency verified against the live sales order.');record.Currency='CAD';count++;
+     }
+    }catch(err){Logger.log('ENTERNEWPART currency lookup failed for order '+soId+': '+String(err.message||err).slice(0,150));}
+   }
+  }
   const plan=hub_enpEnrichmentPlan_(record,catalog,rules);
   for(const key of Object.keys(plan)){
    const i=headers.indexOf(key);if(i<0)continue;const cell=sheet.getRange(n,i+1);
