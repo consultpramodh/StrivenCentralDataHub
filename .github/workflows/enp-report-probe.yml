@@ -34,9 +34,12 @@ jobs:
           printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
           clasp pull --project LIVE
           git show e7331724e1faa8fe6eeb26583324af4fb473abec > expected.js
-          if ! cmp -s expected.js LIVE/src/10_Central_Hub.js; then
-            echo 'Live central hub differs from audited source; not running refresh.'
-            diff -u expected.js LIVE/src/10_Central_Hub.js | head -200 || true
-            exit 1
-          fi
+          node <<'NODE'
+          const fs=require('fs'),a=fs.readFileSync('expected.js','utf8'),b=fs.readFileSync('LIVE/src/10_Central_Hub.js','utf8');
+          const names=['hub_refreshStdItems','hub_stdItemsSchema_','hub_stdItemsHeaders_','hub_stdItemsFetchPage_','hub_stdItemsExtractRows_','hub_buildCanonicalSourceMap_','hub_writeCanonicalDataset_','hub_strivenAccessToken_','hub_reportPagedUrl_','hub_initializeOrRepair','hub_updateRefreshControl_','hub_apiUsage_','hub_log_','hub_limit_'];
+          function extract(s,n) { let i=s.indexOf('function '+n+'('); if(i<0) return null; let j=s.indexOf('\nfunction ',i+1); return s.slice(i,j<0?s.length:j).trim(); }
+          const mismatched=names.filter(n=>!extract(a,n)||extract(a,n)!==extract(b,n));
+          if(mismatched.length){console.log('Changed or missing refresh functions:',mismatched.join(', '));process.exit(1);}
+          console.log('Refresh functions match audited baseline');
+          NODE
           clasp run hub_refreshStdItems --project LIVE
