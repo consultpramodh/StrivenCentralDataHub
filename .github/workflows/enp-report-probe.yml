@@ -1,90 +1,10 @@
-name: Deploy and clean ENTERNEWPART retry state
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  deploy:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Deploy and sanitize retry records
-        run: |
-          set -euo pipefail
-          for d in PRE WORK FRESH VERIFY TEMP; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          git show dd6a1636ee5df73a970161ba0983dd38f66d9c6f > expected.js
-          cmp expected.js PRE/src/ENTERNEWPART.js
-          test ! -f PRE/src/TMP_PROPERTY_AUDIT.js
-          cp -a PRE/src/. WORK/src/
-          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-          clasp push --force --project WORK
-          clasp pull --project VERIFY
-          diff -qr WORK/src VERIFY/src
-          cp -a WORK/src/. TEMP/src/
-          cat >> TEMP/src/ENTERNEWPART.js <<'EOS'
-
-          function hub_onceSanitizeRetryState() {
-            const gate=LockService.getScriptLock();gate.waitLock(10000);
-            try {
-              const p=PropertiesService.getScriptProperties(),lease=p.getProperty('HUB_ENP_WORKER_LEASE');
-              if(lease){let q;try{q=JSON.parse(lease);}catch(e){throw Error('Worker lease is malformed');}if(q.until>Date.now())throw Error('Worker is active; cleanup deferred');}
-              const sheet=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),col=grid[0].indexOf('Workflow Status');
-              if(col<0)throw Error('Workflow Status missing');
-              const props=p.getProperties(),keys=Object.keys(props).filter(k=>/^HUB_ENP_ROW_STATE_\d+$/.test(k));
-              let removed=0,sanitized=0,invalid=0;
-              keys.forEach(k=>{
-                const n=Number(k.slice('HUB_ENP_ROW_STATE_'.length));
-                if(n>=2&&n<=grid.length&&String(grid[n-1][col]||'').trim().toUpperCase()==='COMPLETED'){p.deleteProperty(k);removed++;return;}
-                let state;try{state=JSON.parse(props[k]);}catch(e){invalid++;return;}
-                if(state&&typeof state==='object'&&Object.prototype.hasOwnProperty.call(state,'error')){delete state.error;p.setProperty(k,JSON.stringify(state));sanitized++;}
-              });
-              return JSON.stringify({retryRecordsBefore:keys.length,completedRemoved:removed,errorsRemoved:sanitized,invalidUntouched:invalid,retryRecordsAfter:Object.keys(p.getProperties()).filter(k=>/^HUB_ENP_ROW_STATE_\d+$/.test(k)).length});
-            } finally {gate.releaseLock();}
-          }
-          EOS
-          node --check TEMP/src/ENTERNEWPART.js
-          rm -rf FRESH/src
-          mkdir -p FRESH/src
-          clasp pull --project FRESH
-          diff -qr WORK/src FRESH/src
-          restore() {
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY || return 1
-            diff -qr TEMP/src VERIFY/src || { echo 'Concurrent source change: refusing restore'; return 1; }
-            clasp push --force --project WORK
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src
-            echo RESTORED_AND_VERIFIED
-          }
-          trap restore EXIT
-          clasp push --force --project TEMP
-          clasp run hub_onceSanitizeRetryState --project TEMP
+      - run: echo 'No operational action configured'
