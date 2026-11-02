@@ -1,68 +1,10 @@
-name: Verify DATA_ITEMS report source
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  audit:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Compare report identity
-        run: |
-          set -euo pipefail
-          for d in PRE WORK CHECK VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          git show ebd03428564e5ab081fb2f662a48ddd7344849a6 > expected.js
-          cmp expected.js PRE/src/ENTERNEWPART.js
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'EOS'
-
-          function hub_onceCheckItemsReportIdentity() {
-            const p=PropertiesService.getScriptProperties(),raw=p.getProperty('STRIVEN_STD_ITEMS_REPORT_URL');
-            if(!raw)return JSON.stringify({configured:false});
-            const base=String(raw).trim().split('?')[0].replace(/\/$/,'');
-            const h=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,base,Utilities.Charset.UTF_8).map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
-            return JSON.stringify({configured:true,matchesProvidedReport:h==='a2221e5a5a46eb3c4bc3efd9ef473fa02d68fff85b14a8983d0dbc7253d18e31',hasQuery:String(raw).indexOf('?')>=0});
-          }
-          EOS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project CHECK
-          diff -qr PRE/src CHECK/src
-          restore() {
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY || return 1
-            diff -qr WORK/src VERIFY/src || { echo 'Concurrent project change; restoration stopped'; return 1; }
-            clasp push --force --project PRE
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-            echo RESTORED_VERIFIED
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_onceCheckItemsReportIdentity --project WORK
+      - run: echo 'No operational action configured'
