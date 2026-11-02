@@ -3064,6 +3064,22 @@ function hub_enpEnrichmentPlan_(record,catalog,rules) {
    if(vals.length===1 && !norm(record[k]))result[k]=vals[0];
   });
  }
+ // Exact supplier-catalog identities verified against Osburn's official parts pages.
+ // Require the original requested name to agree; never infer by SKU prefix.
+ const verified={
+  'OA10240':{name:/^BLACK STEEL BASE(?: \(OA10240\))?$/i,url:'https://www.osburn-mfg.com/en/replacement-parts/parts-list/?productId=OB02042'},
+  'OA10242':{name:/^BLACK DECORATIVE SIDE PANEL(?: \(OA10242\))?$/i,url:'https://www.osburn-mfg.com/en/replacement-parts/parts-list/?productId=OB02042'},
+  'AC02090':{name:/^INSULATED FLEX PIPE(?: \(AC02090\))?$/i,url:'https://www.osburn-mfg.com/en/products/wood-inserts/inspire-wood-insert/'},
+  'AC03095':{name:/^FAN KIT(?: \(AC03095\))?$/i,url:'https://www.osburn-mfg.com/en/replacement-parts/parts-list/?productId=OB02042'}
+ };
+ const known=verified[sku],sameSku=catalog.filter(x=>norm(x.ItemNumber)===sku&&Number(x.Id)>0);
+ if(known&&known.name.test(String(record['Item Name']||'').trim())&&sameSku.length===0){
+  // Supplier choice follows the hub's existing SBI accessory catalog, not a discount inference.
+  if(!norm(record['Item Category']))result['Item Category']='Hearth - Accessories';
+  if(!norm(record['Preferred Vendor']))result['Preferred Vendor']='SBI - Stove Builder International inc.';
+  if(!norm(record.Manufacturer))result.Manufacturer='SBI - Stove Builder International inc.';
+  if(!norm(record['Research URL']))result['Research URL']=known.url;
+ }
  if(!norm(record['Preferred Vendor'])&&!result['Preferred Vendor']){
   const words=v=>norm(v).replace(/[^A-Z0-9]+/g,' ').trim();
   const text=' '+words([record['Item Name'],record.Description,record['Original Description']].join(' '))+' ';
