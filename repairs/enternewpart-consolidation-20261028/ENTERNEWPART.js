@@ -313,10 +313,11 @@ function enp_hubRunEligibleRows_(reportRows) {
   const old=props.getProperty(lease);if(old){const state=JSON.parse(old);if(state.until>started)return {status:'BUSY',processed:0};}
   props.setProperty(lease,JSON.stringify({token:token,until:started+5*60*1000}));
  }finally{gate.releaseLock();}
- const results=[];
+ const results=[],review=[],deferred=[];
+ let row=2;
  try{
   const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),h=enp_indexByHeader_(grid[0]);
-  for(let row=2;row<=grid.length&&Date.now()-started<180000;row++){
+  for(;row<=grid.length&&Date.now()-started<180000;row++){
    const values=grid[row-1];if(Array.isArray(reportRows)&&reportRows.indexOf(row)<0)continue;
    if(!enp_hubHasData_(values,h)||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'||enp_hubIsHeld_(values[h['Workflow Status']]))continue;
    let plan;try{plan=enp_hubAutomaticPlan_(grid,row);}catch(e){
@@ -324,17 +325,19 @@ function enp_hubRunEligibleRows_(reportRows) {
     if(values[h['Workflow Status']]!=='NEEDS REVIEW'||values[h['Review Reason']]!==reason){
      sheet.getRange(row,h['Workflow Status']+1).setValue('NEEDS REVIEW');
      sheet.getRange(row,h['Review Reason']+1).setValue(reason);
-    }continue;
+    }review.push({row:row,itemNumber:String(values[h['Item Number']]||''),reason:reason});continue;
    }
    const key='HUB_ENP_ROW_STATE_'+row,raw=props.getProperty(key);let state=raw?JSON.parse(raw):{};
    if(state.fingerprint!==plan.fingerprint)state={fingerprint:plan.fingerprint,attempts:0,nextAt:0};
-   if(state.attempts>=3||state.nextAt>Date.now())continue;
+   if(state.attempts>=3||state.nextAt>Date.now()){deferred.push({row:row,itemNumber:String(values[h['Item Number']]||''),reason:state.attempts>=3?'Retry limit reached; row needs review':'Retry cooldown'});continue;}
    state.attempts++;state.nextAt=Date.now()+10*60*1000;props.setProperty(key,JSON.stringify(state));
    try{const result=enp_hubExecuteRow_(row);results.push(result);props.deleteProperty(key);if(result.status==='COMPLETED'&&Array.isArray(reportRows)){try{const updated=hub_refreshEnternewpartReport();result.reportRefresh={reportRows:updated.reportRows,completedStillInReport:updated.completedStillInReport.length};if(updated.completedStillInReport.length)break;}catch(refreshError){result.reportRefresh={status:'FAILED',reason:String(refreshError.message||refreshError)};break;}}}
    catch(e){state.error=String(e.message||e);props.setProperty(key,JSON.stringify(state));results.push({status:'BLOCKED',row:row,reason:state.error});}
    if(Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0)>Date.now())break;
   }
-  return {status:'COMPLETE',processed:results.length,results:results};
+  const timedOut=row<=grid.length&&Date.now()-started>=180000;
+  const attention=review.length||deferred.length||results.some(x=>x.status!=='COMPLETED')||timedOut;
+  return {status:attention?'ATTENTION_REQUIRED':'COMPLETE',processed:results.length,completed:results.filter(x=>x.status==='COMPLETED').length,results:results,review:review,deferred:deferred,timeLimitReached:timedOut};
  }finally{
   const current=props.getProperty(lease);if(current&&JSON.parse(current).token===token)props.deleteProperty(lease);
  }
@@ -3073,6 +3076,7 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  if(!activeRows.length)return 0;
  const book=sheet.getParent(),catalogSheet=book.getSheetByName('DATA_ITEMS'),rulesSheet=book.getSheetByName('ENP_VENDOR_RULES');
  if(!catalogSheet||!rulesSheet)return 0;
+ const categorySheet=book.getSheetByName('ENP_CATEGORY_RULES'),categoryRules=categorySheet?categorySheet.getDataRange().getValues():[];
  const records=catalogSheet.getDataRange().getValues(),head=records[0]||[],col={};head.forEach((k,i)=>col[k]=i);
  if(['ItemNumber','Id','ItemCategory','PreferredVendor','Manufacturer'].some(k=>col[k]===undefined))return 0;
  const catalog=records.slice(1).map(r=>({ItemNumber:r[col.ItemNumber],Id:r[col.Id],ItemCategory:r[col.ItemCategory],PreferredVendor:r[col.PreferredVendor],Manufacturer:r[col.Manufacturer]}));
@@ -3103,10 +3107,18 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
    }
   }
   const plan=hub_enpEnrichmentPlan_(record,catalog,rules);
+  const category=String(record['Item Category']||plan['Item Category']||'').trim().toUpperCase();
+  if(category && !String(record['Serial Number Tracking']||'').trim() && categoryRules.length){
+   const ch=categoryRules[0],ci=ch.indexOf('Item Category (reference)'),si=ch.indexOf('Serial Tracking');
+   if(ci>=0&&si>=0){
+    const matches=[...new Set(categoryRules.slice(1).filter(r=>String(r[ci]||'').trim().toUpperCase()===category).map(r=>String(r[si]||'').trim().toUpperCase()).filter(v=>v==='YES'||v==='NO'))];
+    if(matches.length===1)plan['Serial Number Tracking']=matches[0];
+   }
+  }
   for(const key of Object.keys(plan)){
    const i=headers.indexOf(key);if(i<0)continue;const cell=sheet.getRange(n,i+1);
    if(cell.getFormula()||String(cell.getValue()||'').trim())continue;
-   cell.setValue(plan[key]).setNote('Filled from an unambiguous exact item match or explicit product-family vendor rule.');count++;
+   cell.setValue(plan[key]).setNote(key==='Serial Number Tracking'?'Filled from the unambiguous category rule; YES remains blocked until the serial tracking write path is verified.':'Filled from an unambiguous exact item match or explicit product-family vendor rule.');count++;
   }
  }
  return count;
