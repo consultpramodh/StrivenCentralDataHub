@@ -332,7 +332,7 @@ function enp_hubRunEligibleRows_(reportRows) {
    if(state.attempts>=3||state.nextAt>Date.now()){deferred.push({row:row,itemNumber:String(values[h['Item Number']]||''),reason:state.attempts>=3?'Retry limit reached; row needs review':'Retry cooldown'});continue;}
    state.attempts++;state.nextAt=Date.now()+10*60*1000;props.setProperty(key,JSON.stringify(state));
    try{const result=enp_hubExecuteRow_(row);results.push(result);props.deleteProperty(key);if(result.status==='COMPLETED'&&Array.isArray(reportRows)){try{const updated=hub_refreshEnternewpartReport();result.reportRefresh={reportRows:updated.reportRows,completedStillInReport:updated.completedStillInReport.length};if(updated.completedStillInReport.length)break;}catch(refreshError){result.reportRefresh={status:'FAILED',reason:String(refreshError.message||refreshError)};break;}}}
-   catch(e){state.error=String(e.message||e);props.setProperty(key,JSON.stringify(state));results.push({status:'BLOCKED',row:row,reason:state.error});}
+   catch(e){results.push({status:'BLOCKED',row:row,reason:String(e.message||e)});}
    if(Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0)>Date.now())break;
   }
   const timedOut=row<=grid.length&&Date.now()-started>=180000;
@@ -3153,6 +3153,11 @@ function hub_refreshEnternewpartReport() {
     if(existing.has(k))throw new Error('Ambiguous existing report row');
     existing.set(k,i+2);
    }else if(!r[idx['Item Number']]&&!r[idx.Source]&&!r[idx['Original Description']]&&!r[idx['SO Internal ID']])slots.push(i+2);
+  });
+  // Retain retry controls for unresolved rows, but remove state after verified completion.
+  Object.keys(p.getProperties()).filter(k=>/^HUB_ENP_ROW_STATE_\d+$/.test(k)).forEach(k=>{
+   const n=Number(k.slice('HUB_ENP_ROW_STATE_'.length));
+   if(n>=2 && n<=grid.length && norm(grid[n-1][idx['Workflow Status']]).toUpperCase()==='COMPLETED')p.deleteProperty(k);
   });
   const seen=new Set(),todo=[];
   source.forEach(r=>{
