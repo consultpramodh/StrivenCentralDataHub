@@ -1,75 +1,10 @@
-name: Compare DATA_ITEMS report schemas
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  audit:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Compare small report samples
-        run: |
-          set -euo pipefail
-          for d in PRE WORK CHECK VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          git show ebd03428564e5ab081fb2f662a48ddd7344849a6 > expected.js
-          cmp expected.js PRE/src/ENTERNEWPART.js
-          cp -a PRE/src/. WORK/src/
-          cat >> WORK/src/ENTERNEWPART.js <<'EOS'
-
-          function hub_onceCompareItemSourceSchemas() {
-            const p=PropertiesService.getScriptProperties(),book=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU');
-            const original=String(p.getProperty('STRIVEN_STD_ITEMS_REPORT_URL')||'').trim();
-            const requested=String(book.getSheetByName('REPORT_REGISTRY').getRange('H24').getValue()||'').trim().split('?')[0].replace(/\/$/,'');
-            const h=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,requested,Utilities.Charset.UTF_8).map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
-            if(h!=='a2221e5a5a46eb3c4bc3efd9ef473fa02d68fff85b14a8983d0dbc7253d18e31')throw Error('Registry endpoint differs from requested report');
-            const token=hub_strivenAccessToken_(p.getProperty('CLIENT_ID'),p.getProperty('CLIENT_SECRET')).accessToken;
-            function inspect(url){
-              const payload=hub_stdItemsFetchPage_(url,token,0,10),rows=hub_stdItemsExtractRows_(payload),out={rows:rows.length,shape:Array.isArray(payload)?'array':Object.keys(payload||{}),keys:rows.length?Object.keys(rows[0]):[]};
-              if(rows.length){try{out.map=hub_buildCanonicalSourceMap_(rows[0],hub_stdItemsSchema_(),false);out.exactSchema=true;}catch(e){out.exactSchema=false;out.schemaError=String(e.message||e);}const idKey=out.map&&out.map.Id;out.uniqueIds=idKey?new Set(rows.map(r=>String(r[idKey]))).size:null;}
-              return out;
-            }
-            return JSON.stringify({current:inspect(original),requested:inspect(requested)});
-          }
-          EOS
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project CHECK
-          diff -qr PRE/src CHECK/src
-          restore() {
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY || return 1
-            diff -qr WORK/src VERIFY/src || { echo 'Concurrent project change; restoration stopped'; return 1; }
-            clasp push --force --project PRE
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-            echo RESTORED_VERIFIED
-          }
-          trap restore EXIT
-          clasp push --force --project WORK
-          clasp run hub_onceCompareItemSourceSchemas --project WORK
+      - run: echo 'No operational action configured'
