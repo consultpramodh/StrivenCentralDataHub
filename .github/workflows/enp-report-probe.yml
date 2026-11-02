@@ -1,15 +1,15 @@
-name: Switch DATA_ITEMS to verified inventory report
+name: Refresh DATA_ITEMS from inventory report
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
     paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  deploy:
+  refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,83 +27,11 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Backup and deploy reviewed adapter
+      - name: Verify deployed code and run refresh once
         run: |
           set -euo pipefail
-          for d in PRE WORK FRESH VERIFY TEMP; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
-          done
-          clasp pull --project PRE
-          git show e7331724e1faa8fe6eeb26583324af4fb473abec > baseline.js
-          node <<'NODE'
-          const fs=require('fs'),a=fs.readFileSync('baseline.js','utf8'),b=fs.readFileSync('PRE/src/10_Central_Hub.js','utf8');
-          const names=['hub_refreshStdItems','hub_stdItemsSchema_','hub_stdItemsHeaders_','hub_stdItemsFetchPage_','hub_stdItemsExtractRows_','hub_buildCanonicalSourceMap_','hub_normalizeFieldName_','hub_writeCanonicalDataset_','hub_reportPagedUrl_'];
-          function get(s,n){let i=s.indexOf('function '+n+'('),j=s.indexOf('\nfunction ',i+1);return i<0?null:s.slice(i,j<0?s.length:j).trim();}
-          const bad=names.filter(n=>!get(a,n)||get(a,n)!==get(b,n));
-          if(bad.length)throw Error('Changed refresh functions: '+bad.join(', '));
-          if(/https?:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]{20,}/.test(b))throw Error('Live code contains a report endpoint; cannot back it up in repository safely');
-          NODE
-          cp -a PRE/src/. WORK/src/
-          node repairs/enternewpart-consolidation-20261028/patch-data-items-source.js WORK/src/10_Central_Hub.js
-          node --check WORK/src/10_Central_Hub.js
-          mkdir -p backups/data-items-source-20261102
-          cp PRE/src/10_Central_Hub.js backups/data-items-source-20261102/10_Central_Hub.before.js
-          cp WORK/src/10_Central_Hub.js backups/data-items-source-20261102/10_Central_Hub.after.js
-          git config user.name 'Central Hub maintenance'
-          git config user.email 'central-hub-maintenance@users.noreply.github.com'
-          git add backups/data-items-source-20261102/
-          git diff --cached --quiet || git commit -m 'Backup DATA_ITEMS source before and after inventory adapter'
-          git push origin HEAD:work/enternewpart-consolidation-20261028
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-          clasp push --force --project WORK
-          clasp pull --project VERIFY
-          diff -qr WORK/src VERIFY/src
-          cp -a WORK/src/. TEMP/src/
-          cat >> TEMP/src/ENTERNEWPART.js <<'EOS'
-
-          function hub_onceSwitchInventorySource() {
-            const lock=LockService.getScriptLock();lock.waitLock(10000);
-            try {
-              const p=PropertiesService.getScriptProperties();
-              const next=String(SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('REPORT_REGISTRY').getRange('H24').getValue()||'').trim().split('?')[0].replace(/\/$/,'');
-              const hash=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,next,Utilities.Charset.UTF_8).map(x=>('0'+((x+256)%256).toString(16)).slice(-2)).join('');
-              if(hash!=='a2221e5a5a46eb3c4bc3efd9ef473fa02d68fff85b14a8983d0dbc7253d18e31')throw Error('Requested report identity does not match.');
-              const old=p.getProperty('STRIVEN_STD_ITEMS_REPORT_URL');
-              if(!old)throw Error('Existing item report configuration missing.');
-              const backupKey='STRIVEN_STD_ITEMS_REPORT_URL_PREVIOUS';
-              const prior=p.getProperty(backupKey);
-              if(prior&&prior!==old&&old!==next)throw Error('Existing rollback configuration differs; no switch performed.');
-              const token=hub_strivenAccessToken_(p.getProperty('CLIENT_ID'),p.getProperty('CLIENT_SECRET')).accessToken;
-              const response=hub_stdItemsFetchPage_(next,token,0,2),rows=hub_stdItemsExtractRows_(response);
-              if(Number(response.pageIndex)!==0||!Number.isSafeInteger(Number(response.totalRecords))||rows.length!==2)throw Error('New report pagination preflight failed.');
-              const schema=hub_stdItemsSchema_().concat([{canonical:'ManufacturePart',aliases:['ManufacturePart']},{canonical:'SerialNumberTracking',aliases:['SerialNumberTracking']}]);
-              rows.forEach(r=>hub_buildCanonicalSourceMap_(hub_normalizeInventoryItemsRow_(r),schema,false));
-              if(!prior&&old!==next)p.setProperty(backupKey,old);
-              p.setProperty('STRIVEN_STD_ITEMS_REPORT_URL',next);
-              if(p.getProperty('STRIVEN_STD_ITEMS_REPORT_URL')!==next)throw Error('Source readback failed.');
-              return JSON.stringify({status:'SWITCHED',pageIndex:Number(response.pageIndex),reportedRows:Number(response.totalRecords),sampleSchema:'PASS',previousSourceBackedUp:!!p.getProperty(backupKey)});
-            }finally{lock.releaseLock();}
-          }
-          EOS
-          node --check TEMP/src/ENTERNEWPART.js
-          rm -rf FRESH/src
-          mkdir -p FRESH/src
-          clasp pull --project FRESH
-          diff -qr WORK/src FRESH/src
-          restore() {
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY || return 1
-            diff -qr TEMP/src VERIFY/src || { echo 'Concurrent project change; restoration stopped'; return 1; }
-            clasp push --force --project WORK
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY
-            diff -qr WORK/src VERIFY/src
-            echo TEMP_SOURCE_RESTORED
-          }
-          trap restore EXIT
-          clasp push --force --project TEMP
-          clasp run hub_onceSwitchInventorySource --project TEMP
+          mkdir -p LIVE/src
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
+          clasp pull --project LIVE
+          cmp backups/data-items-source-20261102/10_Central_Hub.after.js LIVE/src/10_Central_Hub.js
+          clasp run hub_refreshStdItems --project LIVE
