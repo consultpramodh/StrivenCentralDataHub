@@ -1,42 +1,10 @@
-name: Finish verified ENTERNEWPART accessory requests
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  run-worker:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Verify source and process current queue
-        run: |
-          set -euo pipefail
-          mkdir -p LIVE/src
-          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
-          clasp pull --project LIVE
-          git show ebd03428564e5ab081fb2f662a48ddd7344849a6 > expected.js
-          cmp expected.js LIVE/src/ENTERNEWPART.js
-          for pass in 1 2 3; do
-            echo "WORKER_PASS_$pass"
-            clasp run hub_processEnternewpartAutomation --project LIVE
-            clasp run hub_refreshEnternewpartReport --project LIVE
-          done
+      - run: echo 'No operational action configured'
