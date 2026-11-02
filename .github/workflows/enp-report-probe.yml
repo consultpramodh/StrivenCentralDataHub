@@ -1,4 +1,4 @@
-name: Deploy and run verified SBI accessory enrichment
+name: Finish verified ENTERNEWPART accessory requests
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -9,7 +9,7 @@ concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  deploy-and-run:
+  run-worker:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,24 +27,16 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Deploy verified source and run the worker
+      - name: Verify source and process current queue
         run: |
           set -euo pipefail
-          for d in PRE WORK FRESH VERIFY; do
-            mkdir -p "$d/src"
-            printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > "$d/.clasp.json"
+          mkdir -p LIVE/src
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
+          clasp pull --project LIVE
+          git show ebd03428564e5ab081fb2f662a48ddd7344849a6 > expected.js
+          cmp expected.js LIVE/src/ENTERNEWPART.js
+          for pass in 1 2 3; do
+            echo "WORKER_PASS_$pass"
+            clasp run hub_processEnternewpartAutomation --project LIVE
+            clasp run hub_refreshEnternewpartReport --project LIVE
           done
-          clasp pull --project PRE
-          git show c2f7f2e9a66e740bb3530350889710fca813bd08 > expected.js
-          cmp expected.js PRE/src/ENTERNEWPART.js
-          cp -a PRE/src/. WORK/src/
-          cp repairs/enternewpart-consolidation-20261028/ENTERNEWPART.js WORK/src/ENTERNEWPART.js
-          node --check WORK/src/ENTERNEWPART.js
-          clasp pull --project FRESH
-          diff -qr PRE/src FRESH/src
-          clasp push --force --project WORK
-          clasp pull --project VERIFY
-          diff -qr WORK/src VERIFY/src
-          echo DEPLOYED_VERIFIED
-          clasp run hub_processEnternewpartAutomation --project WORK
-          clasp run hub_refreshEnternewpartReport --project WORK
