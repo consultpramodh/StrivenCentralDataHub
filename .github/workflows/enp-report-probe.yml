@@ -1,4 +1,4 @@
-name: Audit script property use
+name: Remove temporary property audit helper
 on:
   push:
     branches: [work/enternewpart-consolidation-20261028]
@@ -9,7 +9,7 @@ concurrency:
   group: shared-item-resolver-deployment
   cancel-in-progress: false
 jobs:
-  audit:
+  restore:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -27,7 +27,7 @@ jobs:
           test -n "${CLASPRC_JSON:-}"
           umask 077
           printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Audit properties without revealing values
+      - name: Remove only temporary audit helper
         run: |
           set -euo pipefail
           for d in PRE WORK CHECK VERIFY; do
@@ -37,35 +37,25 @@ jobs:
           clasp pull --project PRE
           git show dd6a1636ee5df73a970161ba0983dd38f66d9c6f > expected.js
           cmp expected.js PRE/src/ENTERNEWPART.js
-          echo 'PROPERTY USAGE IN LIVE PROJECT:'
-          rg -n 'setProperty|setProperties|deleteProperty|deleteAllProperties|getScriptProperties' PRE/src || true
+          test -f PRE/src/TMP_PROPERTY_AUDIT.js
+          grep -q '^function hub_oncePropertyKeyAudit()' PRE/src/TMP_PROPERTY_AUDIT.js
           cp -a PRE/src/. WORK/src/
-          cat > WORK/src/TMP_PROPERTY_AUDIT.js <<'EOS'
-          function hub_oncePropertyKeyAudit() {
-            const p=PropertiesService.getScriptProperties().getProperties();
-            const keys=Object.keys(p).sort(), summary={}, details=[];
-            keys.forEach(k=>{
-              let group=k.startsWith('HUB_ENP_ROW_STATE_')?'HUB_ENP_ROW_STATE':k.startsWith('ENP_ITEM_GROUP_MASTER_BRIDGE_R23_')?'ENP_ITEM_GROUP_RECOVERY':k.startsWith('HUB_ENP_')?'HUB_ENP_OTHER':k.startsWith('ENTERNEWPART_')?'ENTERNEWPART_OTHER':/LOG|HISTORY|EXECUTION|RUN_STATE/i.test(k)?'OTHER_LOG_LIKE':'OTHER';
-              summary[group]=(summary[group]||0)+1;
-              if(group==='HUB_ENP_ROW_STATE'){
-                try {const x=JSON.parse(p[k]);details.push({key:k,attempts:x.attempts,nextAt:x.nextAt,hasError:!!x.error});}
-                catch(e){details.push({key:k,invalid:true});}
-              } else if(group==='ENP_ITEM_GROUP_RECOVERY'||group==='OTHER_LOG_LIKE')details.push({key:k,length:p[k].length});
-            });
-            return JSON.stringify({total:keys.length,summary:summary,details:details});
-          }
-          EOS
+          rm WORK/src/TMP_PROPERTY_AUDIT.js
+          printf '\n' >> WORK/src/ENTERNEWPART.js
           clasp pull --project CHECK
           diff -qr PRE/src CHECK/src
-          restore() {
-            clasp pull --project VERIFY || return 1
-            diff -qr WORK/src VERIFY/src || { echo 'Concurrent source change: refusing restore'; return 1; }
-            clasp push --force --project PRE
-            rm -rf VERIFY/src
-            mkdir -p VERIFY/src
-            clasp pull --project VERIFY
-            diff -qr PRE/src VERIFY/src
-          }
-          trap restore EXIT
           clasp push --force --project WORK
-          clasp run hub_oncePropertyKeyAudit --project WORK
+          clasp pull --project VERIFY
+          diff -qr WORK/src VERIFY/src
+          cp expected.js WORK/src/ENTERNEWPART.js
+          rm -rf CHECK/src
+          mkdir -p CHECK/src
+          clasp pull --project CHECK
+          diff -qr VERIFY/src CHECK/src
+          clasp push --force --project WORK
+          rm -rf VERIFY/src
+          mkdir -p VERIFY/src
+          clasp pull --project VERIFY
+          diff -qr WORK/src VERIFY/src
+          test ! -f VERIFY/src/TMP_PROPERTY_AUDIT.js
+          echo TEMPORARY_HELPER_REMOVED
