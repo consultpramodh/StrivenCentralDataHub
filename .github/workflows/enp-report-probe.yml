@@ -1,37 +1,10 @@
-name: Refresh DATA_ITEMS from inventory report
+name: ENTERNEWPART probe placeholder
 on:
-  push:
-    branches: [work/enternewpart-consolidation-20261028]
-    paths: ['.github/workflows/enp-report-probe.yml']
+  workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: shared-item-resolver-deployment
-  cancel-in-progress: false
 jobs:
-  refresh:
+  placeholder:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install --global @google/clasp@3.3.0
-      - name: Configure Google authorization
-        env:
-          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
-        run: |
-          test -n "${CLASPRC_JSON:-}"
-          umask 077
-          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
-      - name: Verify deployed code and run refresh once
-        run: |
-          set -euo pipefail
-          mkdir -p LIVE/src
-          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
-          clasp pull --project LIVE
-          cmp backups/data-items-source-20261102/10_Central_Hub.after.js LIVE/src/10_Central_Hub.js
-          clasp run hub_refreshStdItems --project LIVE
+      - run: echo 'No operational action configured'
