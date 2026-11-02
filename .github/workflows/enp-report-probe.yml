@@ -1,10 +1,38 @@
-name: ENTERNEWPART probe placeholder
+name: Run ENTERNEWPART worker verification
 on:
-  workflow_dispatch:
+  push:
+    branches: [work/enternewpart-consolidation-20261028]
+    paths: ['.github/workflows/enp-report-probe.yml']
 permissions:
   contents: read
+concurrency:
+  group: shared-item-resolver-deployment
+  cancel-in-progress: false
 jobs:
-  placeholder:
+  run-worker:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
-      - run: echo 'No operational action configured'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global @google/clasp@3.3.0
+      - name: Configure Google authorization
+        env:
+          CLASPRC_JSON: ${{ secrets.HUB_CLASPRC_JSON }}
+        run: |
+          test -n "${CLASPRC_JSON:-}"
+          umask 077
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+      - name: Check live source and run production worker
+        run: |
+          set -euo pipefail
+          mkdir -p LIVE/src
+          printf '%s' '{"scriptId":"1t81y0BcV0cnBEBSKcbZt2nx16IBAg63rRvsfSVpjiDiBvrNi6TEq-AG8","rootDir":"src"}' > LIVE/.clasp.json
+          clasp pull --project LIVE
+          git show dd6a1636ee5df73a970161ba0983dd38f66d9c6f > expected.js
+          cmp expected.js LIVE/src/ENTERNEWPART.js || { echo 'Live script differs from reviewed source; stopped'; exit 1; }
+          clasp run hub_processEnternewpartAutomation --project LIVE
