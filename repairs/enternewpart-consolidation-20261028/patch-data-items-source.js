@@ -32,6 +32,12 @@ swap("        const row = pageRows[i];\n        const rowMap = hub_buildCanonica
 swap("    // Replace DATA_ITEMS only AFTER the entire remote report is fetched and validated.",
 `    if(canonicalRows.length!==expectedTotal)throw new Error('Inventory report row count mismatch; DATA_ITEMS retained.');
     // Replace DATA_ITEMS only AFTER the entire remote report is fetched and validated.`);
+swap("  const clearRows = Math.max(sheet.getLastRow(), neededRows);",
+`  // Preserve leading zeroes and avoid numeric coercion of product identifiers.
+  if(headers.indexOf('ManufacturePart')>=0) ['ItemNumber','ItemsSKU','ItemsUPC','ManufacturePart'].forEach(function(key){
+    const col=headers.indexOf(key);if(col>=0&&neededRows>1)sheet.getRange(2,col+1,neededRows-1,1).setNumberFormat('@');
+  });
+  const clearRows = Math.max(sheet.getLastRow(), neededRows);`);
 const marker="function hub_refreshStdItems() {";
 swap(marker,`function hub_normalizeInventoryItemsRow_(row) {
   if(!row||typeof row!=='object'||Array.isArray(row))throw new Error('Invalid inventory report row.');
