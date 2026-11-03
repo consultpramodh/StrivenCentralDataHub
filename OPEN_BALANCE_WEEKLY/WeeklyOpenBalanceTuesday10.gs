@@ -19,8 +19,8 @@ const OBW = Object.freeze({
   CC: 'jay@classicfireplace.ca',
   ADMIN: 'pramodh@classicfireplace.ca',
   TRIGGER: 'obwRunTuesday10',
-  // Gmail clips around 102 KiB; one full group email must stay under 90 KiB.
-  MAX_HTML_BYTES: 90 * 1024,
+  // Observability only; oversize HTML may be clipped by Gmail, but is sent in full.
+  CLIP_WARNING_BYTES: 90 * 1024,
   GROUPS: [
     {label:'BEACHES', members:['Steve Trevor','Colleen Trevor']},
     {label:'WHITBY', members:['Matthew McLean','Karen Genis']},
@@ -41,7 +41,8 @@ function obwPreflight() {
     sourceRows: plan.sourceRows,
     routingSource: 'CreatedBy (Sales Rep on Open Balance report)',
     groups: plan.messages.map(function(m) {
-      return {label:m.label, rows:m.rows, to:m.to, cc:m.cc, htmlBytes:m.htmlBytes};
+      return {label:m.label, rows:m.rows, to:m.to, cc:m.cc,
+        htmlBytes:m.htmlBytes, mayClip:m.htmlBytes>OBW.CLIP_WARNING_BYTES};
     }),
     schedule: 'Every Tuesday around 10:00 AM America/Toronto'
   };
@@ -64,7 +65,6 @@ function obwSendLargestGroupTest() {
   if(plan.issues.length) throw new Error('Test blocked: '+plan.issues.join(' | '));
   const m=plan.messages.slice().sort(function(a,b){return b.rows-a.rows;})[0];
   if(!m) throw new Error('Test blocked: no email groups.');
-  if(m.htmlBytes>OBW.MAX_HTML_BYTES) throw new Error('Test HTML too large: '+m.htmlBytes);
   const subject='[TEST ONLY] '+m.subject;
   MailApp.sendEmail({
     to:OBW.ADMIN,
@@ -75,7 +75,7 @@ function obwSendLargestGroupTest() {
   });
   const result={
     status:'TEST_SENT',to:OBW.ADMIN,cc:'',group:m.label,
-    transactions:m.rows,htmlBytes:m.htmlBytes,htmlLimit:OBW.MAX_HTML_BYTES,
+    transactions:m.rows,htmlBytes:m.htmlBytes,mayClip:m.htmlBytes>OBW.CLIP_WARNING_BYTES,
     reportRefreshedAt:plan.refreshedAt.toISOString(),
     weeklySendUnchanged:true,
     subject:subject
@@ -172,7 +172,6 @@ function obwRunTuesday10() {
       if (state) throw new Error('Uncertain prior send state for ' + m.label + '; manual review required.');
       // Set state BEFORE sending to avoid duplicate messages on ambiguous failure.
       props.setProperty(stateKey,'SENDING');
-      if(m.htmlBytes>OBW.MAX_HTML_BYTES) throw new Error('Oversized HTML for '+m.label+'.');
       const opts = {to:m.to.join(','),subject:m.subject,htmlBody:m.html,
         body:m.plain,name:'Classic Fireplace & BBQ Store'};
       if (m.cc) opts.cc = m.cc;
@@ -285,10 +284,7 @@ function obwBuildPlan_() {
     // One complete email per group — never split the report.
     const html=obwEmailHtml_(s.label,byMember,feed.fetchedAt,names);
     const htmlBytes=Utilities.newBlob(html,'text/html').getBytes().length;
-    if(htmlBytes>OBW.MAX_HTML_BYTES) {
-      issues.push('Email for '+s.label+' is '+htmlBytes+
-        ' bytes (> '+OBW.MAX_HTML_BYTES+'). Compact further before sending; splitting is disabled.');
-    }
+    // Do not block delivery for Gmail clipping. Still report size in preflight.
     messages.push({
       label:s.label,to:to.slice(),cc:cc,rows:rows.length,
       digestRows:rows.map(function(r){return JSON.stringify(r);}),
