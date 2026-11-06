@@ -1,0 +1,49 @@
+diff --git a/live_enternewpart_audit.js b/live_enternewpart_candidate.js
+index 1808692..89fc4c4 100644
+--- a/live_enternewpart_audit.js
++++ b/live_enternewpart_candidate.js
+@@ -1865,10 +1865,10 @@ function enp_applyReplacementToLine_(targetLine, rep, replacementItem) {
+ 
+   enp_setLineItemObject_(targetLine, newItemId, replacementName);
+ 
+-  const cleanDescription = enp_buildCleanLineDescription_({
+-    name: rep.desiredItemName,
+-    itemNumber: rep.desiredItemNumber
+-  });
++  const cleanDescription = enp_preserveSourceLineDescription_(
++    enp_buildCleanLineDescription_({name: rep.desiredItemName, itemNumber: rep.desiredItemNumber}),
++    targetLine.description != null ? targetLine.description : targetLine.Description
++  );
+ 
+   targetLine.description = cleanDescription;
+   if ('Description' in targetLine) targetLine.Description = cleanDescription;
+@@ -2299,10 +2299,10 @@ function enp_verifySalesOrderReplacement_(
+     if (expectedPrice === null || actualPrice !== expectedPrice) {
+       throw new Error('Verification failed: SO LineId ' + plan.lineId + ' price did not save as expected.');
+     }
+-    const expectedDesc = enp_buildCleanLineDescription_({
+-      name: plan.replacement.desiredItemName,
+-      itemNumber: plan.replacement.desiredItemNumber
+-    });
++    const expectedDesc = enp_preserveSourceLineDescription_(
++      enp_buildCleanLineDescription_({name: plan.replacement.desiredItemName, itemNumber: plan.replacement.desiredItemNumber}),
++      beforeLine.description != null ? beforeLine.description : beforeLine.Description
++    );
+     const actualDesc = enp_norm_(
+       afterLine.description != null ? afterLine.description : afterLine.Description
+     );
+@@ -2603,6 +2603,14 @@ function enp_setLineItemObject_(li, itemId, itemName) {
+   }
+ }
+ 
++// Preserve the full source line so customer-specific instructions survive replacement.
++function enp_preserveSourceLineDescription_(clean, original) {
++  const target = enp_norm_(clean);
++  const source = enp_norm_(original);
++  if (!source || source === target) return target;
++  return target ? target + '\n' + source : source;
++}
++
+ function enp_buildCleanLineDescription_(parsed) {
+   const name = enp_norm_(parsed && parsed.name);
+   const itemNumber = enp_norm_(parsed && parsed.itemNumber);
