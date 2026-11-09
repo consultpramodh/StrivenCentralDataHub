@@ -3270,15 +3270,47 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  * added solely after a fresh live Striven GET proves item ID 36935 still appears.
  * No supplier lookups, no writes, and no full report refresh loop.
  */
+
+/**
+ * A report API URL is a credential. Never embed it in this public repository.
+ * This one-time handoff moves an owner-only staging cell to private Apps Script
+ * Script Properties, then removes the exposed cell after readback verification.
+ * Audit mode is non-mutating.
+ */
+function hub_enpUserProvidedReportUrl_(consume) {
+ const props=PropertiesService.getScriptProperties();
+ const key='HUB_ENP_USER_REPORT_URL';
+ const stored=String(props.getProperty(key)||'').trim();
+ const book=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU');
+ const sh=book.getSheetByName('ENP_PRIVATE_REPORT_STAGING');
+ if(!sh)return stored;
+ const staged=String(sh.getRange('B2').getValue()||'').trim();
+ if(!staged)return stored;
+ if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(staged))
+  throw new Error('ENP_USER_REPORT_URL_INVALID');
+ if(stored&&stored!==staged)
+  throw new Error('ENP_USER_REPORT_URL_CONFLICT: resolve private stored/staged sources manually');
+ if(!consume)return staged;
+ props.setProperty(key,staged);
+ if(props.getProperty(key)!==staged)
+  throw new Error('ENP_USER_REPORT_URL_STORAGE_NOT_VERIFIED');
+ sh.getRange('B2').clearContent();
+ sh.getRange('C2').setValue('Copied to private Apps Script configuration; staging cleared');
+ SpreadsheetApp.flush();
+ return staged;
+}
+
 function hub_enpCollectSourceReportRows_() {
+ const userUrl=hub_enpUserProvidedReportUrl_(true);
  const p=PropertiesService.getScriptProperties(),cfg=[
   {name:'HUB',key:'HUB_ENP_REPORT_URL'},
+  {name:'USER_SUPPLIED',key:'HUB_ENP_USER_REPORT_URL',value:userUrl},
   {name:'LEGACY_APPROVED',key:'STRIVEN_ENTERNEWPART_REPORT_API'},
   {name:'LEGACY_QUOTED',key:'STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'}
  ];
  const distinct=[],seenUrls={};
  cfg.forEach(entry=>{
-  const url=String(p.getProperty(entry.key)||'').trim();
+  const url=String(entry.value||p.getProperty(entry.key)||'').trim();
   if(!url)return;
   if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(url))
    throw new Error('ENP_SOURCE_URL_NOT_ALLOWED_'+entry.key);
@@ -4195,11 +4227,13 @@ function hub_applyApprovedEnternewpartResearch() {
  */
 function hub_auditEnternewpartSourceReports() {
  const p=PropertiesService.getScriptProperties();
+ const userUrl=hub_enpUserProvidedReportUrl_(false);
  const configured=[
   {name:'HUB',key:'HUB_ENP_REPORT_URL'},
+  {name:'USER_SUPPLIED',key:'HUB_ENP_USER_REPORT_URL',value:userUrl},
   {name:'LEGACY_APPROVED',key:'STRIVEN_ENTERNEWPART_REPORT_API'},
   {name:'LEGACY_QUOTED',key:'STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'}
- ].map(x=>({name:x.name,key:x.key,url:String(p.getProperty(x.key)||'').trim()}));
+ ].map(x=>({name:x.name,key:x.key,url:String(x.value||p.getProperty(x.key)||'').trim()}));
  const distinct=[],lookup={};
  configured.filter(x=>x.url).forEach(x=>{
   if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(x.url))
