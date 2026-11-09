@@ -12,11 +12,11 @@ const ctx={
  Utilities:{formatDate(d,z,f){if(f==='yyyy-MM-dd')return '2026-11-09';throw Error('Unexpected format')}},
 };
 vm.createContext(ctx);vm.runInContext(src,ctx,{filename:'ENTERNEWPART.js'});
-const parsed=ctx.hub_descParseFields_('Item Number: AA001\\nItem Name: Brass cap\\nPrice: $14.20'.replace(/\\n/g,'\n'));
+const parsed=ctx.hub_descParseFields_(['Item Number: AA001','Item Name: Brass cap','Price: $14.20'].join(String.fromCharCode(10)));
 eq(parsed.itemNumber,'AA001');eq(parsed.name,'Brass cap');eq(parsed.price,14.2);
 eq(ctx.hub_descParseMoney_('$1,299.95'),1299.95);eq(ctx.hub_descParseMoney_('not a price'),null);
 const engine=ctx.hub_row2LegacyEngine_();
-const note='Item Number: AA001\nItem Name: Brass cap\nPrice: $14.20\nCustomer note: retain';
+const note=['Item Number: AA001','Item Name: Brass cap','Price: $14.20','Customer note: retain'].join(String.fromCharCode(10));
 eq(engine.enp_preserveSourceLineDescription_('Brass cap (AA001)',note),note);
 eq(engine.enp_preserveSourceLineDescription_('Brass cap (AA001)',''),'Brass cap (AA001)');
 assert.throws(()=>engine.enp_hubCheckRequiredFields_({CustomFields:[{Id:775,IsRequired:true,Value:''}]}),/775/);assertions++;
