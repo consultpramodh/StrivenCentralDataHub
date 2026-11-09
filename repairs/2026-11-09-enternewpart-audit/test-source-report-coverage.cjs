@@ -3,7 +3,7 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const script=fs.readFileSync(__dirname+'/ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs','utf8');
-const anchor='function hub_auditEnternewpartSourceReports()';
+const anchor='function hub_enpUserProvidedReportUrl_(';
 const at=script.indexOf(anchor);
 assert.ok(at>0,'Audit helper is missing');
 const body=script.slice(at);
@@ -27,7 +27,7 @@ const audit=make({getScriptProperties(){return {getProperty(k){return keys[k]||n
  {log(s){JSON.parse(s)}},
  {fetch(url,options){calls++;assert.equal(options.method,'get');assert.match(url,/^https:\/\/api\.striven\.com\/v2\/reports\//);
  assert.ok(report[url]);return {getResponseCode(){return 200},getContentText(){return JSON.stringify(report[url])}}}},
- {openById(){return {getSheetByName(){return {getDataRange(){return {getValues(){return values}}},getRange(){writes++;throw Error('NO WRITES')}}}}}},
+ {openById(){return {getSheetByName(name){if(name==='ENP_PRIVATE_REPORT_STAGING')return null;return {getDataRange(){return {getValues(){return values}}},getRange(){writes++;throw Error('NO WRITES')}}}}}},
  ()=>({accessToken:'FAKE_TOKEN'}));
 let tests=0,got=audit();
 assert.equal(got.requests,2);tests++;
