@@ -22,3 +22,7 @@ jobs:
         run: node --check repairs/2026-11-09-enternewpart-audit/ENTERNEWPART.js
       - name: Mocked smoke tests (zero external writes)
         run: node repairs/2026-11-09-enternewpart-audit/test.cjs
+      - name: Full end-to-end syntax check
+        run: node --check < repairs/2026-11-09-enternewpart-audit/ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs
+      - name: End-to-end scope and blocker preservation
+        run: node repairs/2026-11-09-enternewpart-audit/test-end-to-end-scope-and-status.cjs
