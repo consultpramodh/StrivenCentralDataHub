@@ -318,8 +318,8 @@ function enp_hubRunEligibleRows_(reportRows,options) {
   const old=props.getProperty(lease);if(old){const state=JSON.parse(old);if(state.until>started)return {status:'BUSY',processed:0};}
   props.setProperty(lease,JSON.stringify({token:token,until:started+5*60*1000}));
  }finally{gate.releaseLock();}
- const results=[],review=[],deferred=[];
- let row=2;
+ const results=[],review=[],deferred=[],cfRecoveryChecked={};
+ let cfRecoveryReads=0,row=2;
  try{
   const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART'),grid=sheet.getDataRange().getValues(),h=enp_indexByHeader_(grid[0]);
   for(;row<=grid.length&&Date.now()-started<maxTimeMs;row++){
@@ -340,10 +340,39 @@ function enp_hubRunEligibleRows_(reportRows,options) {
    }
    const key='HUB_ENP_ROW_STATE_'+row,raw=props.getProperty(key);let state=raw?JSON.parse(raw):{};
    if(state.fingerprint!==plan.fingerprint)state={fingerprint:plan.fingerprint,attempts:0,nextAt:0};
-   if(state.attempts>=3||state.nextAt>Date.now()){deferred.push({row:row,itemNumber:String(values[h['Item Number']]||''),reason:state.attempts>=3?'Retry limit reached; row needs review':'Retry cooldown'});continue;}
+   const previousReason=String(values[h['Review Reason']]||'');
+   const knownRequired=/SO_CF_(?:775|831)_REQUIRED|Custom Field Id (?:775|831)[^\n]{0,110}is required/i.test(previousReason);
+   // Bounded recovery: check at most 4 distinct previously failed SOs/run,
+   // and no SO more often than every 4 hours. Only live corrected fields
+   // reset a retry cap; never fabricate answers to mandatory fields.
+   if(state.attempts>=3&&knownRequired&&plan.soId){
+    const soKey=String(plan.soId),cooldownKey='HUB_ENP_CF_CHECK_'+soKey;
+    let recovered=cfRecoveryChecked[soKey];
+    if(recovered===undefined&&cfRecoveryReads<4&&Number(props.getProperty(cooldownKey)||0)<Date.now()){
+     cfRecoveryReads++;
+     try{
+      const live=enp_getSalesOrder_(plan.soId);
+      enp_hubCheckRequiredFields_(live,previousReason);
+      recovered=true;
+     }catch(e){recovered=false;}
+     cfRecoveryChecked[soKey]=recovered;
+     props.setProperty(cooldownKey,String(Date.now()+4*60*60*1000));
+    }
+    if(recovered===true)state={fingerprint:plan.fingerprint,attempts:0,nextAt:0};
+   }
+   if(state.attempts>=3||state.nextAt>Date.now()){
+    deferred.push({row:row,itemNumber:String(values[h['Item Number']]||''),
+     reason:state.attempts>=3?'Retry limit reached; verify required fields on original SO':'Retry cooldown'});continue;
+   }
    state.attempts++;state.nextAt=Date.now()+10*60*1000;props.setProperty(key,JSON.stringify(state));
    try{const result=enp_hubExecuteRow_(row);results.push(result);props.deleteProperty(key);/* One report fetch per worker run; never refresh inside the row loop. */}
-   catch(e){results.push({status:'BLOCKED',row:row,reason:String(e.message||e)});}
+   catch(e){
+    const message=String(e.message||e);
+    if(/SO_CF_(?:775|831)_REQUIRED|Custom Field Id (?:775|831)[^\n]{0,110}is required/i.test(message)){
+     state.attempts=3;props.setProperty(key,JSON.stringify(state));
+    }
+    results.push({status:'BLOCKED',row:row,reason:message});
+   }
    if(Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0)>Date.now())break;
   }
   const timedOut=row<=grid.length&&Date.now()-started>=maxTimeMs;
@@ -848,14 +877,42 @@ function enp_hubHasData_(values,col) {
  return ['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[col[key]]);});
 }
 
-function enp_hubCheckRequiredFields_(so){
-  const fields=so&&(so.customFields||so.CustomFields)||[];
-  const missing=(Array.isArray(fields)?fields:[]).filter(function(cf){
-    if(!(cf.isRequired===true||cf.IsRequired===true))return false;
-    const v=cf.value!=null?cf.value:cf.Value!=null?cf.Value:cf.valueText!=null?cf.valueText:cf.ValueText;
-    return v==null||String(v).trim()==='';
-  }).map(function(cf){return cf.id!=null?cf.id:cf.Id;});
-  if(missing.length)throw new Error('LIVE_SO_REQUIRED_FIELDS_MISSING: '+missing.join(', ')+'; resolve on the SO before item creation');
+function enp_hubCustomFieldHasValue_(cf){
+ if(!cf||typeof cf!=='object')return false;
+ const keys=['value','Value','valueText','ValueText','valueNumber','ValueNumber','valueDate','ValueDate',
+  'booleanValue','BooleanValue','optionId','OptionId','optionIds','OptionIds',
+  'selectedOption','SelectedOption','selectedOptions','SelectedOptions'];
+ return keys.some(function(k){
+  const v=cf[k];if(v===undefined||v===null||v==='')return false;
+  if(typeof v==='boolean')return true; // false is an explicit YES/NO response
+  if(Array.isArray(v))return v.length>0;
+  if(typeof v==='object')return Object.keys(v).length>0;
+  return String(v).trim()!==''&&!(k.toLowerCase()==='optionid'&&Number(v)===0);
+ });
+}
+function enp_hubCheckRequiredFields_(so,previousServerError){
+ const raw=so&&(so.customFields||so.CustomFields)||[];
+ const fields=Array.isArray(raw)?raw:[];
+ const required=new Set();
+ fields.forEach(function(cf){
+  if(cf&&(cf.isRequired===true||cf.IsRequired===true)){
+   const id=Number(cf.id!=null?cf.id:cf.Id);
+   if(Number.isSafeInteger(id)&&id>0)required.add(id);
+  }
+ });
+ const error=String(previousServerError||'');
+ [775,831].forEach(function(id){
+  if(new RegExp('Custom Field Id '+id+'[^.\\n]{0,110}is required','i').test(error)||
+     new RegExp('SO_CF_'+id+'_REQUIRED','i').test(error))required.add(id);
+ });
+ const missing=[];
+ required.forEach(function(id){
+  const matches=fields.filter(cf=>Number(cf&&(cf.id!=null?cf.id:cf.Id))===id);
+  if(matches.length!==1||!enp_hubCustomFieldHasValue_(matches[0]))missing.push(id);
+ });
+ if(missing.length)throw new Error('LIVE_SO_REQUIRED_FIELDS_MISSING: '+
+  missing.map(id=>'SO_CF_'+id+'_REQUIRED (Custom Field Id '+id+' is required)').join('; ')+
+  '; complete the actual Sales Order fields before retrying; no value was inferred');
 }
 
 function enp_hubExecuteRow_(rowNumber) {
@@ -863,14 +920,18 @@ function enp_hubExecuteRow_(rowNumber) {
  let plan=null,itemId=null;
  try {
   plan=enp_hubAutomaticPlan_(sheet.getDataRange().getValues(),rowNumber);ENP_HUB_ACTIVE_PLAN=plan;
-  let target=null;
+  let target=null,so=null;
+  // SO verification precedes catalog lookup and any write.
+  if(plan.soId){
+   so=enp_getSalesOrder_(plan.soId);
+   const status=so.status||so.Status||{};
+   if(enp_guardUpper_(status.Name!=null?status.Name:status.name)!==plan.source)throw new Error('Live SO status differs from authorized source');
+   if(String(so.orderNumber!=null?so.orderNumber:so.OrderNumber)!==String(plan.record['Sales Order Number']))throw new Error('Live SO number mismatch');
+   enp_hubCheckRequiredFields_(so,plan.record['Review Reason']);
+  }
   const existing=enp_legacyExactLookupNow_(plan.record['Item Number']);
   itemId=existing?enp_guardItemId_(existing):null;
   if(plan.soId){
-   const so=enp_getSalesOrder_(plan.soId),status=so.status||so.Status||{};
-   if(enp_guardUpper_(status.Name!=null?status.Name:status.name)!==plan.source)throw new Error('Live SO status differs from authorized source');
-   if(String(so.orderNumber!=null?so.orderNumber:so.OrderNumber)!==String(plan.record['Sales Order Number']))throw new Error('Live SO number mismatch');
-   enp_hubCheckRequiredFields_(so);
    target=enp_findTargetPlaceholderLine_(enp_getSalesOrderLineItems_(so),{desiredItemNumber:plan.record['Item Number'],desiredQty:plan.quantity,newItemId:itemId});
    if(!target)throw new Error('No unique exact live SO line; stopped before creation');
    const qty=enp_verificationNumber_(target.qty!=null?target.qty:target.Qty!=null?target.Qty:target.quantity!=null?target.quantity:target.Quantity);
@@ -904,7 +965,7 @@ function enp_hubExecuteRow_(rowNumber) {
    ' replaced; Qty '+plan.quantity+' and line price '+plan.linePrice+' preserved; CF820 updated only when all placeholders resolved.'+(plan.costOmitted?' Cost omitted; Striven may default it to zero.':''));
   return {status:'COMPLETED',row:rowNumber,itemId:itemId,itemResolution:resolved.status,salesOrderId:plan.soId};
  }catch(e){
-  if(plan)try{enp_hubWriteStatus_(sheet,plan,itemId?'ITEM READY — REPLACEMENT BLOCKED':'EXECUTION BLOCKED',String(e.message||e));}catch(statusError){Logger.log(statusError.message);}
+  if(plan)try{enp_hubWriteStatus_(sheet,plan,(itemId||Number(plan.record['Striven Item ID'])>0)?'ITEM READY — REPLACEMENT BLOCKED':'EXECUTION BLOCKED',String(e.message||e));}catch(statusError){Logger.log(statusError.message);}
   throw e;
  }finally{ENP_HUB_ACTIVE_PLAN=null;}
 }
