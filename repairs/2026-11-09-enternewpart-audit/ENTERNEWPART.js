@@ -141,7 +141,8 @@ function hub_enpDescriptionContext_() {
   Object.keys(expected).forEach(function(key){if(headers[Number(key)]!==expected[key])throw new Error('Description audit schema drift: '+expected[key]);});
   if(headers[43]&&headers[43]!=='Description Quality')throw new Error('AR is occupied; no write performed.');
   const rows=[];
-  grid.slice(1).forEach(function(r,i){if(r[1]||r[17]||r[31])rows.push({row:i+2,sku:r[1]||'',name:r[2]||'',price:r[3]==null?'':r[3],raw:r[31]||'',soPrice:r[22],soId:r[19],source:r[17]});});
+  const statusCol=headers.indexOf('Workflow Status');
+  grid.slice(1).forEach(function(r,i){if(r[1]||r[17]||r[31])rows.push({row:i+2,sku:r[1]||'',name:r[2]||'',price:r[3]==null?'':r[3],raw:r[31]||'',soPrice:r[22],soId:r[19],source:r[17],workflowStatus:statusCol>=0?String(r[statusCol]||'').trim():''});});
   const master=SpreadsheetApp.openById('12yGJYyTYW9DRPA53MG7vQJWAK6moFjlQZXu17pfxgCs').getSheetByName('Inventory');
   const shared=book.getSheetByName('DATA_ITEMS');
   const catalog=[];
@@ -153,11 +154,27 @@ function hub_enpDescriptionContext_() {
   });
   return {book:book,sheet:sheet,grid:grid,rows:rows,results:rows.map(function(r){return hub_enpClassifyRecord_(r,catalog);})};
 }
+function hub_enpDescriptionSummary_(ctx) {
+ const categories={},workflowStatuses={},issues={};
+ const attention=[];
+ ctx.results.forEach(function(result,i){
+  const source=ctx.rows[i]||{},status=String(source.workflowStatus||'UNKNOWN').toUpperCase();
+  categories[result.category]=(categories[result.category]||0)+1;
+  workflowStatuses[status]=(workflowStatuses[status]||0)+1;
+  result.issues.forEach(function(issue){issues[issue]=(issues[issue]||0)+1;});
+  if(status!=='COMPLETED'&&result.issues.length&&attention.length<12)attention.push({
+    row:result.row,sku:result.itemNumber||source.sku||'',workflowStatus:status,
+    quality:result.category,issues:result.issues.slice(0,5)
+  });
+ });
+ return {rows:ctx.results.length,categories:categories,workflowStatuses:workflowStatuses,
+  issueCounts:issues,attentionSample:attention,strivenCalls:0,writes:0};
+}
 function hub_previewEnternewpartDescriptions() {
-  const ctx=hub_enpDescriptionContext_(),counts={};
-  ctx.results.forEach(function(r){counts[r.category]=(counts[r.category]||0)+1;});
-  const out={rows:ctx.results.length,categories:counts,strivenCalls:0,writes:0,results:ctx.results};
-  Logger.log(JSON.stringify(out));return out;
+ const ctx=hub_enpDescriptionContext_(),summary=hub_enpDescriptionSummary_(ctx);
+ // Apps Script logs only the bounded summary; complete results are returned to the caller.
+ Logger.log(JSON.stringify(Object.assign({status:'DESCRIPTION_PREVIEW_ONLY'},summary)));
+ return Object.assign({},summary,{results:ctx.results});
 }
 function hub_enpWriteDescriptionReview_(ctx) {
   const name='ENP_DESCRIPTION_REVIEW',sh=ctx.book.getSheetByName(name)||ctx.book.insertSheet(name);
@@ -169,34 +186,24 @@ function hub_enpWriteDescriptionReview_(ctx) {
   if(old>values.length)sh.getRange(values.length+1,1,old-values.length,14).clearContent();
   sh.setFrozenRows(1);
 }
+// Backwards-compatible public handler: only publish proposed changes to a dedicated review tab.
+// Never overwrite live catalog identity, transaction price, cost, authorizations, or source descriptions.
 function hub_applyEnternewpartDescriptionRepairs() {
-  const lock=LockService.getScriptLock();lock.waitLock(30000);
-  try{
-    const ctx=hub_enpDescriptionContext_(),sh=ctx.sheet;
-    // Stop if another editor changed the source during catalog inspection.
-    const current=sh.getDataRange().getValues();
-    if(JSON.stringify(current)!==JSON.stringify(ctx.grid))throw new Error('ENTERNEWPART changed during preparation; rerun preview.');
-    const stamp=Utilities.formatDate(new Date(),'UTC','yyyyMMdd_HHmmss');
-    const backup=sh.copyTo(ctx.book).setName('ENP_DESC_BACKUP_'+stamp);backup.hideSheet();
-    // Validate derived-output ownership before touching operational review cells.
-    const review=ctx.book.getSheetByName('ENP_DESCRIPTION_REVIEW');
-    if(review&&review.getLastRow()&&review.getRange(1,1).getValue()!=='Hub Row')throw new Error('Review sheet is not the owned output.');
-    ctx.results.forEach(function(r){
-      sh.getRange(r.row,2,1,3).setValues([[r.itemNumber,r.itemName,r.price==null?'':r.price]]);
-      sh.getRange(r.row,2,1,3).setNotes([[r.numberStatus+'\n'+r.evidence.join('\n'),r.nameStatus+'\nOriginal Description retained in AF.',r.priceStatus+'\n'+r.evidence.join('\n')]]);
-      const parsed=hub_descParseFields_(r.original);
-      if(parsed.price!==null)sh.getRange(r.row,31).setValue(parsed.price).setNote('Reparsed source selling price from Original Description; not supplier list price.');
-      sh.getRange(r.row,44).setValue(r.category).setNote(r.issues.join(' | '));
-    });
-    sh.getRange(1,44).setValue('Description Quality');sh.showColumns(44);
-    hub_enpWriteDescriptionReview_(ctx);SpreadsheetApp.flush();
-    ctx.results.forEach(function(r){const saved=sh.getRange(r.row,2,1,3).getValues()[0];if(saved[0]!==r.itemNumber||saved[1]!==r.itemName||saved[2]!== (r.price==null?'':r.price))throw new Error('Description repair readback failed at row '+r.row);if(sh.getRange(r.row,32).getValue()!==r.original)throw new Error('Original Description changed at row '+r.row);});
-    const result={status:'REVIEW_SHEET_REPAIRED',rows:ctx.results.length,backup:backup.getName(),strivenCalls:0,strivenWrites:0,creationAuthorizationChanged:false};
-    Logger.log(JSON.stringify(result));return result;
-  }finally{lock.releaseLock();}
+ const lock=LockService.getScriptLock();lock.waitLock(30000);
+ try{
+  const ctx=hub_enpDescriptionContext_(),sheet=ctx.sheet;
+  const current=sheet.getDataRange().getValues();
+  if(JSON.stringify(current)!==JSON.stringify(ctx.grid))throw new Error('ENTERNEWPART changed while preparing description review; rerun preview.');
+  const existing=ctx.book.getSheetByName('ENP_DESCRIPTION_REVIEW');
+  if(existing&&existing.getLastRow()&&existing.getRange(1,1).getValue()!=='Hub Row')throw new Error('ENP_DESCRIPTION_REVIEW schema ownership conflict.');
+  hub_enpWriteDescriptionReview_(ctx);
+  SpreadsheetApp.flush();
+  const out={status:'REVIEW_ONLY_PUBLISHED',rows:ctx.results.length,
+   reviewSheet:'ENP_DESCRIPTION_REVIEW',operationalCellsModified:0,
+   creationAuthorizationChanged:false,strivenCalls:0,strivenWrites:0};
+  Logger.log(JSON.stringify(out));return out;
+ }finally{lock.releaseLock();}
 }
-
-
 function enp_runHubRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_runHubRow2CreateAndReplace(); }
 function hub_previewRow2CreateAndReplace() { return hub_row2LegacyEngine_().enp_previewHubRow2CreateAndReplace(); }
 function hub_recoverItemGroupMasterBridgeWatchdog() { return hub_row2LegacyEngine_().enp_recoverItemGroupMasterBridgeWatchdog(); }
