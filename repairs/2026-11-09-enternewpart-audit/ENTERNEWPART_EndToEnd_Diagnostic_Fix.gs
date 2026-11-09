@@ -3547,6 +3547,9 @@ function hub_runEnternewpartReportWorker_() {
  result.deferredSample=(result.deferred||[]).slice(0,8);
  if(!result.processed&&(result.reviewCount||result.deferredCount||research.status==='NO_WEB_SEARCH_KEYS'))
   result.status='ATTENTION_REQUIRED';
+ // An incomplete discovery surface is not a complete end-to-end run.
+ if(before.sourceCoverage&&before.sourceCoverage.coverageGuaranteed===false&&result.status==='COMPLETE')
+  result.status='ATTENTION_REQUIRED';
  result.reportRefresh={reportRows:before.reportRows,inserted:before.inserted,
    activeRows:before.activeRows.length,
    completedStillInReport:before.completedStillInReport.length,
