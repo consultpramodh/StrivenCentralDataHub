@@ -1,0 +1,34 @@
+name: ENTERNEWPART audit safety tests
+on:
+  pull_request:
+    branches:
+      - work/enternewpart-consolidation-20261028
+    paths:
+      - "repairs/2026-11-09-enternewpart-audit/**"
+      - ".github/workflows/enp-audit-safety-tests.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: node --check repairs/2026-11-09-enternewpart-audit/ENTERNEWPART.js
+      - name: Mocked smoke tests (zero external writes)
+        run: node repairs/2026-11-09-enternewpart-audit/test.cjs
+      - name: Full end-to-end syntax check
+        run: node --check < repairs/2026-11-09-enternewpart-audit/ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs
+      - name: End-to-end scope and blocker preservation
+        run: node repairs/2026-11-09-enternewpart-audit/test-end-to-end-scope-and-status.cjs
+      - name: Source report coverage audit tests (no external writes)
+        run: node repairs/2026-11-09-enternewpart-audit/test-source-report-coverage.cjs
+      - name: End-to-end source recovery and mandatory SO field safety
+        run: node repairs/2026-11-09-enternewpart-audit/test-end-to-end-source-and-fields.cjs
+      - name: Verify private supplemental report handoff (mocked)
+        run: node repairs/2026-11-09-enternewpart-audit/test-private-report-config.cjs
