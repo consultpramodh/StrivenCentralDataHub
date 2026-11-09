@@ -2,7 +2,7 @@
 'use strict';
 const fs=require('node:fs'), assert=require('node:assert/strict');
 const script=fs.readFileSync(__dirname+'/ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs','utf8');
-const start=script.indexOf('function hub_enpCollectSourceReportRows_()');
+const start=script.indexOf('function hub_enpUserProvidedReportUrl_(');
 const end=script.indexOf('function hub_refreshEnternewpartReport()',start);
 assert.ok(start>=0&&end>start);
 const collector=new Function('PropertiesService','Logger','UrlFetchApp','SpreadsheetApp',
@@ -22,7 +22,10 @@ const fn=collector({getScriptProperties:()=>({getProperty:k=>props[k]??null})},
  {log:()=>{}},
  {fetch:(url,opts)=>{assert.equal(opts.method,'get');fetches++;
  return {getResponseCode:()=>200,getContentText:()=>JSON.stringify({rows:original,totalCount:4})}}},
- {openById:id=>{assert.equal(id,'123UZI5PmARY_2F57ABckpGBjiKVwCg4uE-QSoQCO2bU');
+ {openById:id=>{
+ if(id==='13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU')
+  return {getSheetByName:()=>null};
+ assert.equal(id,'123UZI5PmARY_2F57ABckpGBjiKVwCg4uE-QSoQCO2bU');
  return {getSheetByName:()=>({getDataRange:()=>({getValues:()=>legacy}),
   getRange:()=>{sheetWrites++;throw Error('NO_WRITE')}})}}},
  ()=>({accessToken:'MOCK_TOKEN'}),
