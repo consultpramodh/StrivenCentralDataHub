@@ -1,0 +1,62 @@
+ENTERNEWPART end-to-end incident repair — 2026-11-09
+
+Trigger handler: hub_enternewpartEndToEnd
+Installer (after controlled test): hub_enableEnternewpartAutomation
+
+Observed 12:51 PM execution:
+- Report returned 12 lines; no new rows inserted.
+- Research returned NO_WEB_SEARCH_KEYS (no recognized web-capable key in this Apps Script project).
+- 0 approved research updates and 0 Striven rows processed.
+- Queue counted 101 populated; 24 completed; 77 unresolved.
+
+Confirmed from the actual connected ENTERNEWPART sheet:
+- Some completed records already have verified Striven item IDs.
+- Several ITEM READY — REPLACEMENT BLOCKED rows show HTTP 400 for SO custom fields 775 and/or 831.
+- Numerous NEEDS REVIEW records lack Item Category, Preferred Vendor, validated SKU/name, or verified serial tracking API support.
+- These blockers cannot be repaired by a web search alone. Never assume a value for required SO custom fields.
+
+Changes in ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs:
+1. Keep one trigger handler and original three Toronto time slots (10:00, 14:00, 16:00).
+2. Search all unresolved queued requests, including older rows absent from the latest source report.
+   The latest report rows are prioritized first; completed and HOLD/PAUSED rows are excluded.
+   Existing live Striven status, identity, quantity and price preflight still applies before writing.
+3. Log queueScope (active report vs prior backlog), reviewCount, deferredCount,
+   reviewSample, deferredSample, and blockedSample, so zero processed is diagnosable.
+4. Preserve ITEM READY — REPLACEMENT BLOCKED state if basic eligibility fails;
+   do not overwrite an existing order-level Striven error with generic NEEDS REVIEW.
+5. Accept OpenRouter, Tavily, Brave, Serper, Perplexity, NVIDIA and DeepSeek keys
+   from the established ENP_RESEARCH_API_KEYS configuration, direct variables,
+   or common nested ENP_CONFIG / HUB_CONFIG / CONFIG / ENP_AI_KEYS maps.
+   Multiple keys remain supported per provider. Diagnostic emits provider status/counts only.
+6. If only NVIDIA/DeepSeek inference keys are present, clearly report that an actual
+   web-search-capable provider is missing. No fabricated online sources.
+7. No changes to item creation authorization, pricing, vendor discounts, CF820,
+   SO replacement guards, item-group bridge restrictions, or Striven API authentication.
+
+RUNBOOK
+1. Keep a backup copy of the current ENTERNEWPART.gs and triggers.
+2. Replace the complete existing ENTERNEWPART.gs (do not append) with this fixed file.
+   Keep 00_Config.gs and hub_strivenAccessToken_ in the same Apps Script project.
+3. Run hub_enpResearchCredentialStatus() and inspect:
+      hasWebSearchProvider: true/false
+      searchKeyPools: counts per web-search provider
+      hasInferenceProvider: true/false
+      diagnostic: specific reason
+   The script does not expose API key values.
+4. If no search keys are recognized, configure one verified OpenRouter/Tavily/Brave/
+   Serper/Perplexity provider key in 00_Config.gs or the existing ENP_RESEARCH_API_KEYS
+   registry. Do not commit secrets to GitHub or paste them into logs.
+5. Execute hub_previewEnternewpartAutomation() read-only. Inspect review reasons.
+6. Run hub_enternewpartEndToEnd() manually only against controlled, authorized test
+   conditions; it CAN create live Striven items or update Sales Orders.
+7. Once live readback succeeds, run hub_enableEnternewpartAutomation() ONCE.
+   It installs three daily triggers all targeting hub_enternewpartEndToEnd.
+
+SAFETY / STATUS
+- Node.js syntax check: PASS.
+- Offline mocked suites: 29 + 31 + 20 + 33 + 11 = 124 assertions PASS.
+- These tests did not use live API keys or execute Striven writes.
+- Not deployed, not activated, and no live item creation/ SO update performed by this repair.
+- The source of the seven previously mentioned AI keys was not available for runtime
+  inspection; exact variable compatibility must be checked with the credential diagnostic.
+- Live SO required fields 775/831 and custom Item Groups remain gated.
