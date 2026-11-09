@@ -3479,7 +3479,9 @@ function hub_refreshEnternewpartReport() {
   hub_enpEnrichReportRows_(sh,active);
   // Do not silently alter operator filters. Worker uses active row IDs directly.
   SpreadsheetApp.flush();
-  return {status:skipped.length?'REFRESHED_WITH_WARNINGS':'REFRESHED',reportRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport,skipped:skipped,sourceCoverage:collected.meta};
+  return {status:skipped.length?'REFRESHED_WITH_WARNINGS':'REFRESHED',reportRows:collected.meta.reportRows,
+   sourceRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport,
+   skipped:skipped,sourceCoverage:collected.meta};
  }finally{lock.releaseLock();}
 }
 /**
@@ -3550,7 +3552,7 @@ function hub_runEnternewpartReportWorker_() {
  // An incomplete discovery surface is not a complete end-to-end run.
  if(before.sourceCoverage&&before.sourceCoverage.coverageGuaranteed===false&&result.status==='COMPLETE')
   result.status='ATTENTION_REQUIRED';
- result.reportRefresh={reportRows:before.reportRows,inserted:before.inserted,
+ result.reportRefresh={reportRows:before.reportRows,unionRows:before.sourceRows,inserted:before.inserted,
    activeRows:before.activeRows.length,
    completedStillInReport:before.completedStillInReport.length,
    skippedCount:before.skipped.length,skippedSample:before.skipped.slice(0,6),
