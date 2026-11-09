@@ -3201,19 +3201,148 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  return count;
 }
 
-function hub_refreshEnternewpartReport() {
- const p=PropertiesService.getScriptProperties(),url=p.getProperty('HUB_ENP_REPORT_URL');
- if(!/^https:\/\/api\.striven\.com\/v2\/reports\//i.test(String(url||'')))throw new Error('ENTERNEWPART report URL is not configured');
+
+/**
+ * Enternewpart source collection, based on the legacy two-report sync.
+ * Uses each distinct, configured Striven report endpoint ONCE.
+ * The legacy Enternewpart sheet is a candidate index ONLY. An omitted SO is
+ * added solely after a fresh live Striven GET proves item ID 36935 still appears.
+ * No supplier lookups, no writes, and no full report refresh loop.
+ */
+function hub_enpCollectSourceReportRows_() {
+ const p=PropertiesService.getScriptProperties(),cfg=[
+  {name:'HUB',key:'HUB_ENP_REPORT_URL'},
+  {name:'LEGACY_APPROVED',key:'STRIVEN_ENTERNEWPART_REPORT_API'},
+  {name:'LEGACY_QUOTED',key:'STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'}
+ ];
+ const distinct=[],seenUrls={};
+ cfg.forEach(entry=>{
+  const url=String(p.getProperty(entry.key)||'').trim();
+  if(!url)return;
+  if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(url))
+   throw new Error('ENP_SOURCE_URL_NOT_ALLOWED_'+entry.key);
+  if(!seenUrls[url]){seenUrls[url]={url:url,names:[]};distinct.push(seenUrls[url]);}
+  seenUrls[url].names.push(entry.name);
+ });
+ if(!String(p.getProperty('HUB_ENP_REPORT_URL')||'').trim())
+  throw new Error('HUB_ENP_REPORT_URL is missing');
  const cid=p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID');
  const secret=p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET');
  if(!cid||!secret)throw new Error('Striven credentials missing');
- const response=UrlFetchApp.fetch(url,{method:'get',headers:{Authorization:'Bearer '+hub_strivenAccessToken_(cid,secret).accessToken,Accept:'application/json'},muteHttpExceptions:true,followRedirects:false});
- if(response.getResponseCode()!==200)throw new Error('ENTERNEWPART report HTTP '+response.getResponseCode());
- const parsedBody=JSON.parse(response.getContentText());
- const body=parsedBody==='No records found.'?[]:parsedBody;
- const arrays=Array.isArray(body)?[body]:body&&typeof body==='object'?['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]):[];
- if(arrays.length!==1)throw new Error('Unrecognized ENTERNEWPART report response');
- const source=arrays[0],lock=LockService.getScriptLock();lock.waitLock(30000);
+ const token=hub_strivenAccessToken_(cid,secret).accessToken;
+ const norm=x=>String(x==null?'':x).trim().replace(/\r\n?/g,'\n');
+ const upper=x=>norm(x).toUpperCase();
+ const num=x=>{const s=norm(x).replace(/[$,\s]/g,'');return s&&Number.isFinite(Number(s))?Number(s):null;};
+ const fingerprint=r=>JSON.stringify([norm(r.SalesOrderSalesOrderId),norm(r.ItemDescription),num(r.Quantity),num(r.Price)]);
+ const collection=new Map(),stats={reportRequests:0,reportRows:0,reportLines:0,
+  endpoints:[],legacyCandidates:0,liveOrderChecks:0,verifiedLegacyLines:0,warnings:[]};
+ const add=(raw,provider,count)=>{
+  const k=fingerprint(raw);
+  let found=collection.get(k);
+  if(!found){found={rows:[],max:0,sources:[]};collection.set(k,found);}
+  if(found.max<count){for(let i=found.max;i<count;i++)found.rows.push(raw);found.max=count;}
+  if(found.sources.indexOf(provider)<0)found.sources.push(provider);
+ };
+ distinct.forEach(endpoint=>{
+  const response=UrlFetchApp.fetch(endpoint.url,{method:'get',
+   headers:{Authorization:'Bearer '+token,Accept:'application/json'},
+   muteHttpExceptions:true,followRedirects:false});
+  stats.reportRequests++;
+  if(response.getResponseCode()!==200)
+   throw new Error('ENP_REPORT_HTTP_'+response.getResponseCode()+'_'+endpoint.names.join('_'));
+  const parsed=JSON.parse(response.getContentText());
+  const body=parsed==='No records found.'?[]:parsed;
+  const arrays=Array.isArray(body)?[body]:body&&typeof body==='object'
+   ?['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]):[];
+  if(arrays.length!==1)throw new Error('ENP_REPORT_SCHEMA_AMBIGUOUS_'+endpoint.names.join('_'));
+  const records=arrays[0],local=new Map();let eligible=0,rejected=0;
+  records.forEach(r=>{
+   const id=norm(r.ItemItemId),number=upper(r.ItemNumber);
+   if(id!=='36935'&&number!=='ENTERNEWPART'){rejected++;return;}
+   const soId=norm(r.SalesOrderSalesOrderId),desc=norm(r.ItemDescription),
+    qty=num(r.Quantity),price=num(r.Price);
+   if(!soId||!desc||qty===null||qty<=0||price===null||price<0){rejected++;return;}
+   const k=fingerprint(r);if(!local.has(k))local.set(k,{record:r,count:0});
+   local.get(k).count++;eligible++;
+  });
+  local.forEach(v=>add(v.record,endpoint.names.join('+'),v.count));
+  stats.reportRows+=records.length;stats.reportLines+=eligible;
+  const reported=body&&typeof body==='object'&&!Array.isArray(body)
+    ?Number(body.totalCount||body.TotalCount||body.totalRecords||body.TotalRecords||0):0;
+  if(reported>records.length)stats.warnings.push('REPORT_PAGINATION_NOT_EXHAUSTED_'+endpoint.names.join('_'));
+  stats.endpoints.push({sources:endpoint.names,rows:records.length,
+   eligiblePlaceholderRows:eligible,invalidOrOtherItems:rejected});
+ });
+ if(distinct.length===1)stats.warnings.push('ONLY_ONE_CURRENT_REPORT_ENDPOINT');
+ const liveRows=()=>Array.from(collection.values()).reduce((a,x)=>a.concat(x.rows),[]);
+ let union=liveRows();
+ const bySo={};union.forEach(r=>{const id=norm(r.SalesOrderSalesOrderId);bySo[id]=(bySo[id]||0)+1;});
+ // Current legacy workbook is not a live source of truth. It only proposes
+ // missing Sales Order IDs. The legacy Quoted history is intentionally excluded.
+ try{
+  const legacy=SpreadsheetApp.openById('123UZI5PmARY_2F57ABckpGBjiKVwCg4uE-QSoQCO2bU')
+   .getSheetByName('Enternewpart');
+  if(!legacy)throw new Error('legacy Enternewpart tab missing');
+  const grid=legacy.getDataRange().getValues(),head=grid[0]||[];
+  const index={};head.forEach((x,i)=>index[String(x||'').trim()]=i);
+  ['SalesOrderSalesOrderId','ItemItemId','ItemNumber'].forEach(h=>{
+   if(index[h]===undefined)throw new Error('Legacy source header missing '+h);
+  });
+  const candidates={};
+  grid.slice(1).forEach(r=>{
+   const id=norm(r[index.SalesOrderSalesOrderId]),itemId=norm(r[index.ItemItemId]);
+   const itemNumber=upper(r[index.ItemNumber]);
+   if(!/^\d+$/.test(id)||(itemId!=='36935'&&itemNumber!=='ENTERNEWPART'))return;
+   candidates[id]=(candidates[id]||0)+1;
+  });
+  const missing=Object.keys(candidates).filter(id=>candidates[id]>(bySo[id]||0));
+  stats.legacyCandidates=missing.length;
+  // Cap targeted readbacks to preserve Striven API capacity. Unchecked IDs
+  // remain explicitly reported rather than assumed resolved or ignored.
+  for(const soId of missing.slice(0,5)){
+   let so;
+   try{so=hub_row2LegacyEngine_().enp_getSalesOrder_(soId);}
+   catch(e){stats.warnings.push('LEGACY_SO_READ_FAILED_'+soId);continue;}
+   stats.liveOrderChecks++;
+   const status=so&& (so.status||so.Status)||{};
+   const name=upper(typeof status==='string'?status:(status.name!=null?status.name:status.Name));
+   if(!['APPROVED','QUOTED'].includes(name))continue;
+   const soNumber=norm(so.orderNumber!=null?so.orderNumber:so.OrderNumber);
+   const items=hub_row2LegacyEngine_().enp_getSalesOrderLineItems_(so);
+   const current={};items.forEach(li=>{
+    const item=li.item||li.Item||{};
+    const itemId=norm(item.id!=null?item.id:item.Id);
+    if(itemId!=='36935')return;
+    const desc=norm(li.description!=null?li.description:li.Description);
+    const qty=num(li.qty!=null?li.qty:li.Qty!=null?li.Qty:li.quantity!=null?li.quantity:li.Quantity);
+    const price=num(li.price!=null?li.price:li.Price);
+    if(!desc||qty===null||qty<=0||price===null||price<0)return;
+    const r={SalesOrderSalesOrderId:soId,SalesOrderNumber:soNumber,
+     SalesOrderStatus:name==='APPROVED'?'Approved':'Quoted',
+     ItemItemId:36935,ItemNumber:'ENTERNEWPART',ItemDescription:desc,
+     Quantity:qty,Price:price};
+    const k=fingerprint(r);if(!current[k])current[k]={record:r,count:0};
+    current[k].count++;
+   });
+   Object.keys(current).forEach(k=>{
+    const prior=collection.get(k),old=prior?prior.max:0;
+    add(current[k].record,'LIVE_LEGACY_SO_CHECK',current[k].count);
+    const newest=collection.get(k).max;
+    stats.verifiedLegacyLines+=Math.max(0,newest-old);
+   });
+  }
+  if(missing.length>5)stats.warnings.push('LEGACY_CANDIDATES_DEFERRED_'+(missing.length-5));
+ }catch(e){stats.warnings.push('LEGACY_INDEX_UNAVAILABLE');}
+ union=liveRows();
+ stats.unionLines=union.length;
+ stats.unionOrders=new Set(union.map(x=>norm(x.SalesOrderSalesOrderId))).size;
+ stats.coverageGuaranteed=false; // A filtered report plus a legacy index cannot prove completeness.
+ return {rows:union,meta:stats};
+}
+
+function hub_refreshEnternewpartReport() {
+ const p=PropertiesService.getScriptProperties(),collected=hub_enpCollectSourceReportRows_();
+ const source=collected.rows,lock=LockService.getScriptLock();lock.waitLock(30000);
  try {
   const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
   if(!sh)throw new Error('ENTERNEWPART sheet missing');
@@ -3289,7 +3418,7 @@ function hub_refreshEnternewpartReport() {
   hub_enpEnrichReportRows_(sh,active);
   // Do not silently alter operator filters. Worker uses active row IDs directly.
   SpreadsheetApp.flush();
-  return {status:skipped.length?'REFRESHED_WITH_WARNINGS':'REFRESHED',reportRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport,skipped:skipped};
+  return {status:skipped.length?'REFRESHED_WITH_WARNINGS':'REFRESHED',reportRows:source.length,inserted:inserted,activeRows:active,completedStillInReport:completedStillInReport,skipped:skipped,sourceCoverage:collected.meta};
  }finally{lock.releaseLock();}
 }
 /**
@@ -3360,7 +3489,8 @@ function hub_runEnternewpartReportWorker_() {
  result.reportRefresh={reportRows:before.reportRows,inserted:before.inserted,
    activeRows:before.activeRows.length,
    completedStillInReport:before.completedStillInReport.length,
-   skippedCount:before.skipped.length,skippedSample:before.skipped.slice(0,6)};
+   skippedCount:before.skipped.length,skippedSample:before.skipped.slice(0,6),
+   sourceCoverage:before.sourceCoverage};
  result.queue=hub_enpQueueStatusSummary_();
  result.elapsedMillis=Date.now()-started;
  return result;
