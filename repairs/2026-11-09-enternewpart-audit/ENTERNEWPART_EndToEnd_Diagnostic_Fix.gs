@@ -328,12 +328,15 @@ function enp_hubRunEligibleRows_(reportRows,options) {
    let plan;try{plan=enp_hubAutomaticPlan_(grid,row);}catch(e){
     const reason=String(e.message||e);
     const currentStatus=enp_guardUpper_(values[h['Workflow Status']]);
-    if(currentStatus!=='ITEM READY — REPLACEMENT BLOCKED' &&
-      (values[h['Workflow Status']]!=='NEEDS REVIEW'||values[h['Review Reason']]!==reason)){
-     sheet.getRange(row,h['Workflow Status']+1).setValue('NEEDS REVIEW');
-     sheet.getRange(row,h['Review Reason']+1).setValue(reason);
-    }review.push({row:row,itemNumber:String(values[h['Item Number']]||''),
-      status:currentStatus,reason:reason});continue;
+    const previousReason=String(values[h['Review Reason']]||'').trim();
+    // Read-only preflight must preserve the original Striven failures and
+    // the distinction between item-ready and SO-replacement-blocked.
+    const observableStatus=currentStatus||'NEEDS REVIEW';
+    if(!currentStatus)sheet.getRange(row,h['Workflow Status']+1).setValue('NEEDS REVIEW');
+    if(!previousReason)sheet.getRange(row,h['Review Reason']+1).setValue(reason);
+    review.push({row:row,itemNumber:String(values[h['Item Number']]||''),
+      status:observableStatus,reason:reason,
+      previousReason:previousReason.slice(0,250)});continue;
    }
    const key='HUB_ENP_ROW_STATE_'+row,raw=props.getProperty(key);let state=raw?JSON.parse(raw):{};
    if(state.fingerprint!==plan.fingerprint)state={fingerprint:plan.fingerprint,attempts:0,nextAt:0};
@@ -3296,7 +3299,7 @@ function hub_refreshEnternewpartReport() {
  * All stages run inside the single end-to-end entrypoint below.
  */
 function hub_enpPendingQueueRows_(activeRows) {
- const sh=enp_guardHubBook_().getSheetByName('ENTERNEWPART');
+ const sh=hub_row2LegacyEngine_().enp_guardHubBook_().getSheetByName('ENTERNEWPART');
  if(!sh)throw new Error('MISSING_ENTERNEWPART');
  const grid=sh.getDataRange().getValues(),head=grid[0]||[];
  const statusIndex=head.indexOf('Workflow Status'),sourceIndex=head.indexOf('Source'),
