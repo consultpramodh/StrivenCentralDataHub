@@ -3990,3 +3990,112 @@ function hub_applyApprovedEnternewpartResearch() {
     Logger.log(JSON.stringify(out));return out;
   }finally{lock.releaseLock();}
 }
+/**
+ * One-time, READ-ONLY audit: compare the current Hub report with the separate
+ * Approved and Quoted report endpoints used by the working legacy project.
+ * This deliberately does not modify the single end-to-end trigger, Hub rows,
+ * Sales Orders or items. Report URLs are configured per Apps Script PROJECT:
+ * properties in the old ENP project do not automatically exist in the Hub.
+ */
+function hub_auditEnternewpartSourceReports() {
+ const p=PropertiesService.getScriptProperties();
+ const configured=[
+  {name:'HUB',key:'HUB_ENP_REPORT_URL'},
+  {name:'LEGACY_APPROVED',key:'STRIVEN_ENTERNEWPART_REPORT_API'},
+  {name:'LEGACY_QUOTED',key:'STRIVEN_ENTERNEWPART_QUOTED_REPORT_API'}
+ ].map(x=>({name:x.name,key:x.key,url:String(p.getProperty(x.key)||'').trim()}));
+ const distinct=[],lookup={};
+ configured.filter(x=>x.url).forEach(x=>{
+  if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(x.url))
+   throw new Error('ENP_SOURCE_REPORT_URL_INVALID_'+x.key);
+  if(lookup[x.url]){lookup[x.url].names.push(x.name);return;}
+  const record={url:x.url,names:[x.name]};lookup[x.url]=record;distinct.push(record);
+ });
+ const result={status:'AUDIT_ONLY',configured:configured.map(x=>({name:x.name,property:x.key,present:!!x.url})),
+  distinctReportEndpoints:distinct.length,requests:0,unionPlaceholderLines:0,unionSalesOrders:0,
+  byReport:[],sentinel28419Present:false,hubUnmatchedSamples:[],warnings:[],strivenWrites:0,sheetWrites:0};
+ if(!distinct.length){result.status='NO_REPORT_URLS';Logger.log(JSON.stringify(result));return result;}
+ const cid=p.getProperty('CLIENT_ID')||p.getProperty('STRIVEN_CLIENT_ID');
+ const secret=p.getProperty('CLIENT_SECRET')||p.getProperty('STRIVEN_CLIENT_SECRET');
+ if(!cid||!secret)throw new Error('STRIVEN_CREDENTIALS_MISSING');
+ const token=hub_strivenAccessToken_(cid,secret).accessToken;
+ if(!token)throw new Error('STRIVEN_ACCESS_TOKEN_MISSING');
+ const unique={},sourceRows=[];
+ const norm=v=>String(v==null?'':v).trim().replace(/\r\n?/g,'\n').replace(/\s+/g,' ').toUpperCase();
+ const numeric=v=>{const s=String(v==null?'':v).replace(/[$,\s]/g,'');return s&&Number.isFinite(Number(s))?Number(s):null};
+ distinct.forEach(entry=>{
+  const response=UrlFetchApp.fetch(entry.url,{method:'get',muteHttpExceptions:true,followRedirects:false,
+    headers:{Authorization:'Bearer '+token,Accept:'application/json'}});
+  result.requests++;
+  if(response.getResponseCode()!==200)throw new Error('ENP_REPORT_AUDIT_HTTP_'+response.getResponseCode()+'_'+entry.names.join('_'));
+  const parsed=JSON.parse(response.getContentText()),body=parsed==='No records found.'?[]:parsed;
+  const choices=Array.isArray(body)?[body]:body&&typeof body==='object'
+    ?['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]):[];
+  if(choices.length!==1)throw new Error('ENP_REPORT_AUDIT_UNRECOGNIZED_SCHEMA_'+entry.names.join('_'));
+  const rows=choices[0],statuses={},orders=new Set(),seen={};
+  let valid=0,nonPlaceholder=0,missingIdentity=0,duplicateSignature=0;
+  rows.forEach(r=>{
+   const number=norm(r.ItemNumber),id=String(r.ItemItemId==null?'':r.ItemItemId).trim();
+   const placeholder=(id==='36935'||number==='ENTERNEWPART');
+   if(!placeholder){nonPlaceholder++;return;}
+   const so=String(r.SalesOrderSalesOrderId==null?'':r.SalesOrderSalesOrderId).trim();
+   const desc=norm(r.ItemDescription),qty=numeric(r.Quantity),price=numeric(r.Price);
+   if(!so||!desc||qty===null||qty<=0||price===null||price<0){missingIdentity++;return;}
+   const status=norm(r.SalesOrderStatus)||'UNKNOWN';
+   statuses[status]=(statuses[status]||0)+1;orders.add(so);valid++;
+   const fingerprint=JSON.stringify([so,id||'36935',number||'ENTERNEWPART',desc,qty,price]);
+   seen[fingerprint]=(seen[fingerprint]||0)+1;
+   if(seen[fingerprint]>1)duplicateSignature++;
+   // Across distinct reports the same line is counted only once, but
+   // identical physical lines within one report must not silently disappear.
+   const lineKey=JSON.stringify([so,desc,qty,price]);
+   if(!unique[lineKey])unique[lineKey]={so,desc,qty,price,sources:[],maxCopies:0};
+   unique[lineKey].sources.push(entry.names.join('+'));
+   unique[lineKey].maxCopies=Math.max(unique[lineKey].maxCopies,seen[fingerprint]);
+   sourceRows.push({so,desc,qty,price});
+  });
+  const reportedTotal=body&&typeof body==='object'&&!Array.isArray(body)
+   ?Number(body.totalCount||body.TotalCount||body.totalRecords||body.TotalRecords||0):0;
+  if(reportedTotal>rows.length)result.warnings.push(entry.names.join('+')+':PAGINATION_OR_REPORT_TRUNCATION');
+  result.byReport.push({names:entry.names,rowsReturned:rows.length,placeholderRows:valid,
+    salesOrders:orders.size,byStatus:statuses,nonPlaceholder,invalidRows:missingIdentity,
+    identicalSignatureRepeats:duplicateSignature,reportedTotal:reportedTotal||null,
+    containsSO28419:orders.has('28419')});
+ });
+ const liveLines=Object.values(unique);
+ result.unionPlaceholderLines=liveLines.reduce((n,x)=>n+x.maxCopies,0);
+ result.unionSalesOrders=new Set(liveLines.map(x=>x.so)).size;
+ result.sentinel28419Present=liveLines.some(x=>x.so==='28419');
+ if(distinct.length===1)result.warnings.push('ONE_ENDPOINT_ONLY_LEGACY_DUAL_REPORT_COVERAGE_NOT_CONFIGURED');
+ if(!result.sentinel28419Present)result.warnings.push('SO_28419_ABSENT_FROM_ALL_CONFIGURED_REPORTS');
+ const sheet=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
+ if(!sheet)throw new Error('ENP_HUB_SHEET_MISSING');
+ const grid=sheet.getDataRange().getValues(),head=grid[0],idx={};
+ head.forEach((x,i)=>{if(x)idx[x]=i});
+ ['SO Internal ID','Original Description','Quantity','SO Line Price','Workflow Status','Source']
+  .forEach(h=>{if(idx[h]===undefined)throw new Error('ENP_HUB_AUDIT_SCHEMA_MISSING_'+h)});
+ const existing={};
+ grid.slice(1).forEach((row,i)=>{
+  if(!String(row[idx.Source]||'').trim())return;
+  const so=String(row[idx['SO Internal ID']]||'').trim();
+  if(!so)return;
+  const key=JSON.stringify([so,norm(row[idx['Original Description']]),
+    numeric(row[idx.Quantity]),numeric(row[idx['SO Line Price']])]);
+  if(!existing[key])existing[key]=[];
+  existing[key].push({row:i+2,status:String(row[idx['Workflow Status']]||'')});
+ });
+ liveLines.forEach(line=>{
+  const key=JSON.stringify([line.so,line.desc,line.qty,line.price]),match=existing[key]||[];
+  if(match.length<line.maxCopies&&result.hubUnmatchedSamples.length<12)
+   result.hubUnmatchedSamples.push({soId:line.so,numberOfLiveLines:line.maxCopies,
+    matchingHubRows:match.length});
+ });
+ result.hubUnmatchedCount=liveLines.filter(line=>{
+  const key=JSON.stringify([line.so,line.desc,line.qty,line.price]);
+  return (existing[key]||[]).length<line.maxCopies;
+ }).length;
+ result.status=result.warnings.length||result.hubUnmatchedCount?'ATTENTION_REQUIRED':'COVERAGE_AUDITED';
+ result.checkedAtUtc=new Date().toISOString();
+ Logger.log(JSON.stringify(result));
+ return result;
+}
