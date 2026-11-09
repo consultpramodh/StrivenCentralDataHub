@@ -43,7 +43,7 @@ const operationalSheet={
  getDataRange(){return {getValues(){return sourceGrid}}},
  getRange(){throw Error('Unexpected mutation to operational ENP sheet')}
 };
-const descriptor={row:2,itemNumber:'AA001',category:'STRUCTURED',issues:[],
+const descriptor={row:2,itemNumber:'AA001',category:'STRUCTURED',issues:[],evidence:[],
  original:'Sensitive source details must not appear in Logger output'};
 const reviewContext={book:{getSheetByName(name){if(name==='ENP_DESCRIPTION_REVIEW')return reviewSheet;throw Error('Other review tab')}},sheet:operationalSheet,
  grid:sourceGrid,rows:[{row:2,sku:'AA001',workflowStatus:'COMPLETED',soId:20,source:'Approved'}],results:[descriptor]};
