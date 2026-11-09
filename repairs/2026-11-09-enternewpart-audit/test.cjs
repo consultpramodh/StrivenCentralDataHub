@@ -30,4 +30,32 @@ eq(ctx.hub_enternewpartScheduledRun({triggerUid:'unrelated'}).status,'UNKNOWN_SC
 eq(ctx.hub_pauseEnternewpartAutomation().removedTriggers,3);eq(ts.length,0);
 yes(src.includes('ITEM_GROUP_TRANSACTION_MISMATCH'));
 yes(src.includes('if(allResolved)enp_applyCf820ToReplacementPayload_(payload)'));
+// Description preview must not log every full original description.
+const recorded=[];ctx.Logger.log=(s)=>recorded.push(String(s));
+const sourceGrid=[['header']];
+const reviewWrites=[];
+const reviewSheet={
+ getLastRow(){return 0},getMaxRows(){return 10},
+ getRange(row,column,height,width){return {setValues(values){reviewWrites.push(values)},getValues(){return [[]]}}},
+ setFrozenRows(){}
+};
+const operationalSheet={
+ getDataRange(){return {getValues(){return sourceGrid}}},
+ getRange(){throw Error('Unexpected mutation to operational ENP sheet')}
+};
+const descriptor={row:2,itemNumber:'AA001',category:'STRUCTURED',issues:[],
+ original:'Sensitive source details must not appear in Logger output'};
+const reviewContext={book:{getSheetByName(name){if(name==='ENP_DESCRIPTION_REVIEW')return reviewSheet;throw Error('Other review tab')}},sheet:operationalSheet,
+ grid:sourceGrid,rows:[{row:2,sku:'AA001',workflowStatus:'COMPLETED',soId:20,source:'Approved'}],results:[descriptor]};
+ctx.hub_enpDescriptionContext_=()=>reviewContext;
+ctx.SpreadsheetApp={flush(){}};
+const summary=ctx.hub_previewEnternewpartDescriptions();
+eq(summary.rows,1);eq(summary.workflowStatuses.COMPLETED,1);
+eq(summary.results[0].original,descriptor.original);
+yes(recorded.length===1&&!recorded[0].includes('Sensitive source details'));
+const published=ctx.hub_applyEnternewpartDescriptionRepairs();
+eq(published.status,'REVIEW_ONLY_PUBLISHED');
+eq(published.operationalCellsModified,0);eq(reviewWrites.length,1);
+yes(!src.includes('sh.getRange(r.row,2,1,3).setValues([[r.itemNumber'));
+
 console.log(JSON.stringify({status:'PASS',assertions,externalCalls:0,externalWrites:0}));
