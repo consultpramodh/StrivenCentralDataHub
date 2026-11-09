@@ -3081,7 +3081,12 @@ return {enp_runHubRow2CreateAndReplace,enp_previewHubRow2CreateAndReplace,enp_re
 
 /* Google Apps Script — Central Hub manual controls and Toronto business-hour schedule. */
 function hub_previewEnternewpartAutomation() {
- const result=hub_row2LegacyEngine_().enp_hubPreviewAllRows_();Logger.log(JSON.stringify(result));return result;
+ const result=hub_row2LegacyEngine_().enp_hubPreviewAllRows_();
+ const summary={status:'AUTOMATION_PREVIEW_ONLY',rows:result.rows,eligible:result.eligible,
+   completed:result.completed,review:result.review,held:result.held,unauthorized:result.unauthorized,
+   sample:(result.results||[]).filter(x=>x.status==='REVIEW'||x.status==='HOLD').slice(0,10)};
+ Logger.log(JSON.stringify(summary));
+ return result;
 }
 
 // Refresh and reconcile the live ENTERNEWPART report without moving stored rows.
