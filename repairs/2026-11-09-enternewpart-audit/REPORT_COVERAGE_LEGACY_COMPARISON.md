@@ -47,3 +47,13 @@ Updated `ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs` now restores source collection
 **Verification:** Full script syntax parsed; 13 mocked source/field assertions and 13 existing source-audit assertions executed in isolation with zero external writes; GitHub Actions also runs the regression suite. **Not live-deployed by this change.**
 
 **Remaining blocker:** Report Builder `33051` still excludes at least one actual placeholder SO. The fallback improves coverage for *known legacy candidates* only. To obtain exhaustive discovery, correct the report definition or configure a broader verified source report; do not claim the end-to-end automation is 100% comprehensive yet.
+
+## Private user-supplied report URL handoff (2026-11-09)
+
+The user supplied another Striven `/v2/reports/` API-key URI for ENTERNEWPART. **Do not commit this sensitive URL to public GitHub.** Striven's API Settings documentation warns that custom-report URIs can expose report data.
+
+The Hub spreadsheet (owner-only at staging time) contains a **hidden, temporary** `ENP_PRIVATE_REPORT_STAGING` tab with `B2` holding the supplied report URL. The latest `ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs` reads and validates that value. The normal end-to-end run promotes it to the private Apps Script Script Property `HUB_ENP_USER_REPORT_URL`, verifies the property, then clears `B2` and marks the handoff as complete. No report URI is logged or committed.
+
+The current configured `HUB_ENP_REPORT_URL` is retained. Both are fetched only when their URLs differ, and the resulting placeholder lines are unioned without collapsing repeated physical lines. `hub_auditEnternewpartSourceReports()` can inspect both sources **without writing or consuming the staging URL**. An incorrectly configured or unavailable supplemental report fails before new item or SO writes, rather than silently claiming comprehensive coverage.
+
+**Deployment remains outstanding** until the updated file is pushed to the live Apps Script project. The sensitive URL stays in the owner-only spreadsheet while undeployed, so do not share the Hub spreadsheet before handoff and cleanup. A successful mocked regression suite does not prove that the newly supplied endpoint returns the expected App Integration JSON; this still requires the first authenticated live read.
