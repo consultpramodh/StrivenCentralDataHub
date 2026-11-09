@@ -40,3 +40,11 @@
 
 ## Local verification
 A companion offline Node.js harness performed 29 assertions against the separately generated local patch, including simulated report-row growth, duplicate handling, trigger idempotency, required field preflight, description retention, and Item Group safety. The GitHub copy must still pass its own CI and production integration checks before deployment.
+
+
+## 2026-11-09 description audit hardening
+- `hub_previewEnternewpartDescriptions()` now logs only the category counts, workflow status counts, issue counts and up to 12 short examples; it **returns** all full results without truncating application data.
+- `hub_previewEnternewpartAutomation()` also logs a concise summary and returns its complete preview object.
+- `hub_applyEnternewpartDescriptionRepairs()` is intentionally **review-only** despite its historical name. It writes proposed descriptions and evidence to `ENP_DESCRIPTION_REVIEW`; it never overwrites ENTERNEWPART item numbers, item names, prices, source descriptions, existing completion statuses, authorizations, or AR quality cells. Previously the handler rewrote operational columns B:D across all rows.
+- If the live Google Apps Script still contains the old implementation, do **not run** the apply handler: the GitHub patch does not automatically deploy.
+- The description preview uses local catalog spreadsheets, not online research, and zero Striven API calls; `NO_CATALOG_IDENTITY` alone is not proof that the item is absent in Striven.
