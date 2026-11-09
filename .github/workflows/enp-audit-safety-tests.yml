@@ -26,3 +26,5 @@ jobs:
         run: node --check < repairs/2026-11-09-enternewpart-audit/ENTERNEWPART_EndToEnd_Diagnostic_Fix.gs
       - name: End-to-end scope and blocker preservation
         run: node repairs/2026-11-09-enternewpart-audit/test-end-to-end-scope-and-status.cjs
+      - name: Source report coverage audit tests (no external writes)
+        run: node repairs/2026-11-09-enternewpart-audit/test-source-report-coverage.cjs
