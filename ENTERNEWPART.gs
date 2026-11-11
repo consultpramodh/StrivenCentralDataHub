@@ -1646,11 +1646,10 @@ function enp_hubPlanRow_(grid,rowNumber,verifiedExistingItem) {
  if(source==='QUOTED'&&r['Quoted Authorization']!==true)throw new Error('Quoted Authorization must be TRUE');
  const sku=enp_guardNorm_(r['Item Number']),name=enp_guardCanonicalName_(r['Item Name'],sku);
  if(name!==r['Item Name'])throw new Error('Item Name must be Item Name (Item Number)');
- const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost);
+ const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost),costOmitted=cost===null;
  if(verifiedExistingItem&&enp_guardUpper_(enp_guardItemNumber_(verifiedExistingItem))!==enp_guardUpper_(sku))throw new Error('LIVE_EXISTING_ITEM_NUMBER_CONFLICT');
  if(!verifiedExistingItem){
  if(price===null||price<0||(cost!==null&&cost<0))throw new Error('Nonnegative catalog Price and Cost required');
- const costOmitted=cost===null;
  if(costOmitted&&!enp_hubCanOmitCost_(r))throw new Error('Catalog Cost missing but a matching vendor discount exists or cost is invalid');
  if(r.Currency!=='CAD')throw new Error('Only verified CAD base currency is supported');
  if(r['Location Name']!=='60 - WAREHOUSE (Ajax)'||r['Item Type']!=='Inventory'||enp_guardUpper_(r.Taxable)!=='YES')throw new Error('Fixed location, taxable or item type differs');
