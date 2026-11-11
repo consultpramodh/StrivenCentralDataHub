@@ -968,6 +968,7 @@ function enp_hubExecuteRow_(rowNumber) {
    const price=enp_verificationNumber_(target.price!=null?target.price:target.Price);
    if(qty!==plan.quantity||price!==plan.linePrice)throw new Error('Live SO quantity or line price changed');
   }
+  if(plan.soId)enp_soDefaultInventoryLocationId_();
   let resolved;
   if(existing){
    itemId=enp_guardItemId_(existing);
@@ -978,7 +979,6 @@ function enp_hubExecuteRow_(rowNumber) {
    enp_hubHydrateCreateReferences_(plan.record,base);
    enp_guardBuildHubCreatePayload_(base);
    enp_hubWriteStatus_(sheet,plan,'READY','Metadata verified; creating item with duplicate guard.');
-   if(plan.soId)enp_soDefaultInventoryLocationId_();
    resolved=enp_guardCreateOrResolveItem_(base);
    itemId=Number(resolved.id);
   }
@@ -996,7 +996,7 @@ function enp_hubExecuteRow_(rowNumber) {
    desiredItemNumber:plan.record['Item Number'],desiredItemName:plan.baseName,desiredPrice:plan.linePrice,desiredQty:plan.quantity,newItemId:itemId,expectedSoStatus:plan.source,expectedDescription:plan.record['Original Description'],expectedPrice:plan.linePrice}]);
   if(!result||result.blocked||!Array.isArray(result.replacements)||result.replacements.length!==1)throw new Error('SO replacement did not return one verified line');
   enp_hubWriteStatus_(sheet,plan,'COMPLETED','Verified Item ID '+itemId+'; SO '+plan.soId+' line '+result.replacements[0].lineId+
-   ' replaced; Qty '+plan.quantity+' and line price '+plan.linePrice+' preserved; CF820 updated only when all placeholders resolved.'+(plan.costOmitted?' Cost omitted; Striven may default it to zero.':''));
+   ' replaced; Qty '+plan.quantity+' and line price '+plan.linePrice+' preserved; CF820 updated only when all placeholders resolved.'+(plan.costOmitted&&!existing?' Cost omitted; Striven may default it to zero.':''));
   return {status:'COMPLETED',row:rowNumber,itemId:itemId,itemResolution:resolved.status,salesOrderId:plan.soId};
  }catch(e){
   if(plan)try{enp_hubWriteStatus_(sheet,plan,(itemId||Number(plan.record['Striven Item ID'])>0)?'ITEM READY — REPLACEMENT BLOCKED':'EXECUTION BLOCKED',String(e.message||e));}catch(statusError){Logger.log(statusError.message);}
@@ -1647,6 +1647,7 @@ function enp_hubPlanRow_(grid,rowNumber,verifiedExistingItem) {
  const sku=enp_guardNorm_(r['Item Number']),name=enp_guardCanonicalName_(r['Item Name'],sku);
  if(name!==r['Item Name'])throw new Error('Item Name must be Item Name (Item Number)');
  const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost),costOmitted=cost===null;
+ if(/\b(?:please confirm|to be confirmed)\b/i.test(String(r['Original Description']||'')))throw new Error('SOURCE_PRICE_UNCONFIRMED: Confirm the original Sales Order price before replacement');
  if(verifiedExistingItem&&enp_guardUpper_(enp_guardItemNumber_(verifiedExistingItem))!==enp_guardUpper_(sku))throw new Error('LIVE_EXISTING_ITEM_NUMBER_CONFLICT');
  if(!verifiedExistingItem){
  if(price===null||price<0||(cost!==null&&cost<0))throw new Error('Nonnegative catalog Price and Cost required');
@@ -1668,7 +1669,6 @@ function enp_hubPlanRow_(grid,rowNumber,verifiedExistingItem) {
    qty=enp_verificationNumber_(r.Quantity);linePrice=enp_verificationNumber_(r['SO Line Price']);
    if(qty===null||qty<=0||linePrice===null||linePrice<0)throw new Error('SO quantity and line price required');
    if(!enp_lineDescriptionMatchesExactItemNumber_(r['Original Description'],sku))throw new Error('Original SO description does not identify the exact reviewed Item Number');
-   if(/\b(?:please confirm|to be confirmed)\b/i.test(String(r['Original Description']||'')))throw new Error('SOURCE_PRICE_UNCONFIRMED: Confirm the original Sales Order price before replacement');
  }
  // Same SKU on different orders is permitted only with consistent catalog data.
  // Same-SKU comparison is confined to report-active rows; backlog must not block them.
