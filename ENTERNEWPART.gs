@@ -294,19 +294,44 @@ function enp_recoverItemGroupMasterBridgeWatchdog() {
 
 // Exact read-only live SKU lookup; once per distinct SKU in this report invocation.
 function enp_hubExactLiveItemCached_(sku){
- if(!ENP_HUB_EXACT_ITEM_CACHE||typeof ENP_HUB_EXACT_ITEM_CACHE!=='object')throw new Error('CURRENT_REPORT_EXACT_ITEM_SCOPE_REQUIRED');
+ if(!ENP_HUB_EXACT_ITEM_CACHE||typeof ENP_HUB_EXACT_ITEM_CACHE!=='object')
+   throw new Error('CURRENT_REPORT_EXACT_ITEM_SCOPE_REQUIRED');
  const wanted=enp_guardUpper_(sku);
- if(!wanted||wanted==='ENTERNEWPART'||!enp_descValidNumber_(wanted))throw new Error('INVALID_EXACT_ITEM_NUMBER');
- if(Object.prototype.hasOwnProperty.call(ENP_HUB_EXACT_ITEM_CACHE,wanted))return ENP_HUB_EXACT_ITEM_CACHE[wanted];
- const found=enp_guardResolveExistingItem_(wanted)||null;
- if(found){
-  const id=enp_guardItemId_(found);
-  if(!Number.isSafeInteger(id)||id<=0||enp_guardUpper_(enp_guardItemNumber_(found))!==wanted)throw new Error('LIVE_EXACT_ITEM_IDENTITY_UNVERIFIED');
+ if(!wanted||wanted==='ENTERNEWPART'||!enp_descValidNumber_(wanted))
+   throw new Error('INVALID_EXACT_ITEM_NUMBER');
+ if(Object.prototype.hasOwnProperty.call(ENP_HUB_EXACT_ITEM_CACHE,wanted))
+   return ENP_HUB_EXACT_ITEM_CACHE[wanted];
+ // Direct, read-only Striven search. Do NOT call enp_guardResolveExistingItem_()
+ // or enp_legacyExactLookupNow_(): both can write request/status rows.
+ const matches={};let found=null;
+ for(let page=0;page<3;page++){
+   const response=enp_guardRawRequest_('POST','/v1/items/search',
+     {ItemNumber:wanted,PageIndex:page,PageSize:1000},false);
+   if(!response.ok)throw new Error('EXACT_CATALOG_SEARCH_HTTP_'+response.code);
+   const result=enp_legacySearchPage_(response.body);
+   result.rows.forEach(function(item){
+     if(enp_guardUpper_(enp_guardItemNumber_(item))!==wanted)return;
+     const id=enp_guardItemId_(item);
+     if(!Number.isSafeInteger(id)||id<=0)throw new Error('EXACT_ITEM_SEARCH_ID_INVALID');
+     matches[id]=item;
+   });
+   const ids=Object.keys(matches);
+   if(ids.length>1)throw new Error('DUPLICATE_EXACT_LIVE_ITEM_NUMBER_'+wanted);
+   if(!result.rows.length&&result.count!==null&&page*1000<result.count)
+     throw new Error('CATALOG_SEARCH_PREMATURE_EMPTY_PAGE');
+   if(result.count!==null?(page+1)*1000>=result.count:result.rows.length<1000){
+     found=ids.length?enp_legacyLiveItem_(Number(ids[0])):null;
+     if(found){
+       if(enp_guardUpper_(enp_guardItemNumber_(found))!==wanted||
+          enp_guardItemId_(found)!==Number(ids[0]))
+         throw new Error('EXACT_LIVE_CATALOG_IDENTITY_MISMATCH');
+     }
+     ENP_HUB_EXACT_ITEM_CACHE[wanted]=found;
+     return found;
+   }
  }
- ENP_HUB_EXACT_ITEM_CACHE[wanted]=found;
- return found;
+ throw new Error('EXACT_ITEM_SEARCH_PAGE_LIMIT_EXCEEDED_'+wanted);
 }
-
 function enp_hubPreviewAllRows_(reportRows) {
  if(!Array.isArray(reportRows))throw new Error('CURRENT_REPORT_SCOPE_REQUIRED_FOR_PREVIEW');
  const reportSet=new Set(reportRows.filter(Number.isSafeInteger));
