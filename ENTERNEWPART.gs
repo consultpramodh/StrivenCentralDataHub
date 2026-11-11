@@ -3244,6 +3244,20 @@ function hub_enpEnrichmentPlan_(record,catalog,rules) {
    if(vals.length===1 && !norm(record[k]))result[k]=vals[0];
   });
  }
+ // A distinct SKU can represent the same accessory shape as an existing
+ // catalog product. Transfer CATEGORY ONLY if the full descriptive name is
+ // exactly equal and every matching catalog row agrees on one nonblank category.
+ // Do not transfer item ID, manufacturer, preferred vendor, cost or price:
+ // those remain item-specific and require separate evidence.
+ if(!norm(record['Item Category'])&&!result['Item Category']){
+  const currentName=String(record['Item Name']||'').trim();
+  const suffix=' ('+sku+')';
+  const normalized=(currentName.toUpperCase().endsWith(suffix)?
+    currentName.slice(0,-suffix.length):currentName).replace(/\s+/g,' ').trim().toUpperCase();
+  const matchesByName=catalog.filter(x=>norm(String(x.ItemName||'').replace(/\s+/g,' '))===normalized&&Number(x.Id)>0);
+  const cats=[...new Set(matchesByName.map(x=>String(x.ItemCategory||'').trim()).filter(Boolean))];
+  if(cats.length===1&&matchesByName.length>0)result['Item Category']=cats[0];
+ }
  // Exact supplier-catalog identities verified against Osburn's official parts pages.
  // Require the original requested name to agree; never infer by SKU prefix.
  const verified={
@@ -3275,7 +3289,7 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
  const categorySheet=book.getSheetByName('ENP_CATEGORY_RULES'),categoryRules=categorySheet?categorySheet.getDataRange().getValues():[];
  const records=catalogSheet.getDataRange().getValues(),head=records[0]||[],col={};head.forEach((k,i)=>col[k]=i);
  if(['ItemNumber','Id','ItemCategory','PreferredVendor','Manufacturer'].some(k=>col[k]===undefined))return 0;
- const catalog=records.slice(1).map(r=>({ItemNumber:r[col.ItemNumber],Id:r[col.Id],ItemCategory:r[col.ItemCategory],PreferredVendor:r[col.PreferredVendor],Manufacturer:r[col.Manufacturer]}));
+ const catalog=records.slice(1).map(r=>({ItemNumber:r[col.ItemNumber],Id:r[col.Id],ItemName:col.ItemName==null?'':r[col.ItemName],ItemCategory:r[col.ItemCategory],PreferredVendor:r[col.PreferredVendor],Manufacturer:r[col.Manufacturer]}));
  const rg=rulesSheet.getDataRange().getValues(),rh=rg[0]||[],v=rh.indexOf('Supplier Name (Info!B)'),f=rh.indexOf('Product Family (Info!C)');
  if(v<0||f<0)return 0;
  const rules=rg.slice(1).map(r=>({supplier:r[v],family:r[f]})),grid=sheet.getDataRange().getValues(),headers=grid[0]||[];
@@ -3314,7 +3328,7 @@ function hub_enpEnrichReportRows_(sheet,activeRows) {
   for(const key of Object.keys(plan)){
    const i=headers.indexOf(key);if(i<0)continue;const cell=sheet.getRange(n,i+1);
    if(cell.getFormula()||String(cell.getValue()||'').trim())continue;
-   cell.setValue(plan[key]).setNote(key==='Serial Number Tracking'?'Filled from the unambiguous category rule; YES remains blocked until the serial tracking write path is verified.':'Filled from an unambiguous exact item match or explicit product-family vendor rule.');count++;
+   cell.setValue(plan[key]).setNote(key==='Serial Number Tracking'?'Filled from the unambiguous category rule; YES remains blocked until the serial tracking write path is verified.':'Filled from one consistent internal catalog classification or existing verified family rule. Item number, vendor, cost and price are not inferred from related products.');count++;
   }
  }
  return count;
