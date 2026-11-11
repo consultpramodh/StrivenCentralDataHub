@@ -3465,8 +3465,48 @@ function hub_enpCollectSourceReportRows_() {
  return {rows:union,meta:stats};
 }
 
+/**
+ * ENTERNEWPART R5 source authority — the ONE configured report.
+ * Other configured endpoints and legacy workbook data are intentionally excluded.
+ * Read-only Striven request; no queue or Striven writes here.
+ */
+function hub_enpFetchCurrentReportOnly_() {
+ const props=PropertiesService.getScriptProperties();
+ const url=String(props.getProperty('HUB_ENP_REPORT_URL')||'').trim();
+ if(!/^https:\/\/api\.striven\.com\/v2\/reports\/[A-Za-z0-9_-]+(?:\?.*)?$/i.test(url))
+   throw new Error('CURRENT_ENP_REPORT_URL_MISSING_OR_INVALID');
+ const cid=props.getProperty('CLIENT_ID')||props.getProperty('STRIVEN_CLIENT_ID');
+ const secret=props.getProperty('CLIENT_SECRET')||props.getProperty('STRIVEN_CLIENT_SECRET');
+ if(!cid||!secret)throw new Error('STRIVEN_CREDENTIALS_MISSING');
+ const token=hub_strivenAccessToken_(cid,secret).accessToken;
+ const response=UrlFetchApp.fetch(url,{method:'get',
+   headers:{Authorization:'Bearer '+token,Accept:'application/json'},
+   muteHttpExceptions:true,followRedirects:false});
+ if(response.getResponseCode()!==200)
+   throw new Error('CURRENT_REPORT_HTTP_'+response.getResponseCode());
+ let parsed;try{parsed=JSON.parse(response.getContentText());}
+ catch(err){throw new Error('CURRENT_REPORT_NOT_JSON');}
+ const body=parsed==='No records found.'?[]:parsed;
+ const arrays=Array.isArray(body)?[body]:body&&typeof body==='object'
+   ?['rows','Rows','data','Data','Results','results'].filter(k=>Array.isArray(body[k])).map(k=>body[k]):[];
+ if(arrays.length!==1)throw new Error('CURRENT_REPORT_ROWS_ENVELOPE_AMBIGUOUS');
+ const rows=arrays[0];
+ if(rows.some(r=>!r||typeof r!=='object'||Array.isArray(r)))
+   throw new Error('CURRENT_REPORT_ROW_SCHEMA_INVALID');
+ if(!Array.isArray(body)){
+   const hinted=['totalCount','TotalCount','totalRecords','TotalRecords']
+     .map(k=>body[k]).filter(v=>v!=null&&String(v).trim()!=='');
+   if(hinted.length){
+     const totals=[...new Set(hinted.map(Number))];
+     if(totals.length!==1||!Number.isSafeInteger(totals[0])||totals[0]!==rows.length)
+       throw new Error('CURRENT_REPORT_PAGINATION_OR_TOTAL_MISMATCH');
+   }
+ }
+ return {rows:rows,reportRequests:1,endpoint:'HUB_ENP_REPORT_URL'};
+}
+
 function hub_refreshEnternewpartReport() {
- const p=PropertiesService.getScriptProperties(),collected=hub_enpCollectSourceReportRows_();
+ const p=PropertiesService.getScriptProperties(),collected=hub_enpFetchCurrentReportOnly_();
  const source=collected.rows,lock=LockService.getScriptLock();lock.waitLock(30000);
  try {
   const sh=SpreadsheetApp.openById('13OKw69We9tsIWzEQwNOl4aAHh11qrsICSOt781O2upU').getSheetByName('ENTERNEWPART');
@@ -3562,7 +3602,7 @@ function hub_refreshEnternewpartReport() {
  */
 function hub_enpPendingQueueRows_(activeRows) {
  if(!Array.isArray(activeRows))throw new Error('CURRENT_REPORT_SCOPE_REQUIRED');
- const sh=enp_guardHubBook_().getSheetByName('ENTERNEWPART');
+ const sh=hub_row2LegacyEngine_().enp_guardHubBook_().getSheetByName('ENTERNEWPART');
  if(!sh)throw new Error('MISSING_ENTERNEWPART');
  const grid=sh.getDataRange().getValues(),headers=grid[0]||[],h={};
  headers.forEach((key,i)=>h[key]=i);
