@@ -3502,7 +3502,7 @@ function hub_enpFetchCurrentReportOnly_() {
        throw new Error('CURRENT_REPORT_PAGINATION_OR_TOTAL_MISMATCH');
    }
  }
- return {rows:rows,reportRequests:1,endpoint:'HUB_ENP_REPORT_URL'};
+ return {rows:rows,reportRequests:1,endpoint:'HUB_ENP_REPORT_URL',meta:{reportRows:rows.length,reportRequests:1,source:'HUB_ENP_REPORT_URL',endpoints:1,legacyCandidates:0,verifiedLegacyLines:0,warnings:[]}};
 }
 
 function hub_refreshEnternewpartReport() {
