@@ -1,6 +1,6 @@
 /**
  * ENTERNEWPART — consolidated script (Google Apps Script V8)
- * Version 2026-11-11-R5 (current-report-only) — one end-to-end handler for manual and scheduled execution.
+ * Version 2026-11-11-R5.1 (current-report-only, live-item-first) — one end-to-end handler for manual and scheduled execution.
  * Existing 00_Config.gs and hub_strivenAccessToken_() remain dependencies.
  * Safety: research is source-backed, review-only; no web hit authorizes item creation.
  * Production deployment requires separate verification against live Striven API schema.
@@ -292,6 +292,21 @@ function enp_recoverItemGroupMasterBridgeWatchdog() {
   }
 }
 
+// Exact read-only live SKU lookup; once per distinct SKU in this report invocation.
+function enp_hubExactLiveItemCached_(sku){
+ if(!ENP_HUB_EXACT_ITEM_CACHE||typeof ENP_HUB_EXACT_ITEM_CACHE!=='object')throw new Error('CURRENT_REPORT_EXACT_ITEM_SCOPE_REQUIRED');
+ const wanted=enp_guardUpper_(sku);
+ if(!wanted||wanted==='ENTERNEWPART'||!enp_descValidNumber_(wanted))throw new Error('INVALID_EXACT_ITEM_NUMBER');
+ if(Object.prototype.hasOwnProperty.call(ENP_HUB_EXACT_ITEM_CACHE,wanted))return ENP_HUB_EXACT_ITEM_CACHE[wanted];
+ const found=enp_guardResolveExistingItem_(wanted)||null;
+ if(found){
+  const id=enp_guardItemId_(found);
+  if(!Number.isSafeInteger(id)||id<=0||enp_guardUpper_(enp_guardItemNumber_(found))!==wanted)throw new Error('LIVE_EXACT_ITEM_IDENTITY_UNVERIFIED');
+ }
+ ENP_HUB_EXACT_ITEM_CACHE[wanted]=found;
+ return found;
+}
+
 function enp_hubPreviewAllRows_(reportRows) {
  if(!Array.isArray(reportRows))throw new Error('CURRENT_REPORT_SCOPE_REQUIRED_FOR_PREVIEW');
  const reportSet=new Set(reportRows.filter(Number.isSafeInteger));
@@ -301,15 +316,16 @@ function enp_hubPreviewAllRows_(reportRows) {
   if(!reportSet.has(row))continue;
   const values=grid[row-1];if(!['Item Number','Original Description','Source','SO Internal ID'].some(function(key){return enp_guardNorm_(values[h[key]]);}))continue;
   if(enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'){results.push({row:row,status:'COMPLETED'});continue;}
-  try{const plan=enp_hubAutomaticPlan_(grid,row);results.push({row:row,status:'ELIGIBLE',itemNumber:plan.record['Item Number']});}
+  try{const existing=enp_hubExactLiveItemCached_(values[h['Item Number']]);const plan=enp_hubAutomaticPlan_(grid,row,existing);results.push({row:row,status:'ELIGIBLE',itemNumber:plan.record['Item Number'],itemResolution:existing?'EXISTING_VERIFIED':'NEW_WITH_FULL_METADATA'});}
   catch(e){results.push({row:row,status:enp_hubIsHeld_(values[h['Workflow Status']])?'HOLD':'REVIEW',reason:String(e.message||e)});}
  }
  return {rows:results.length,eligible:results.filter(function(r){return r.status==='ELIGIBLE';}).length,
  completed:results.filter(function(r){return r.status==='COMPLETED';}).length,
- unauthorized:0,review:results.filter(function(r){return r.status==='REVIEW';}).length,held:results.filter(function(r){return r.status==='HOLD';}).length,results:results,strivenCalls:0,writes:0};
+ unauthorized:0,review:results.filter(function(r){return r.status==='REVIEW';}).length,held:results.filter(function(r){return r.status==='HOLD';}).length,results:results,distinctLiveItemLookups:Object.keys(ENP_HUB_EXACT_ITEM_CACHE||{}).length,strivenCalls:'READ_ONLY_EXACT_LOOKUPS_PER_SKU',writes:0};
 }
 
 function enp_hubRunEligibleRows_(reportRows,options) {
+ if(!Array.isArray(reportRows)||!(ENP_HUB_ACTIVE_REPORT_ROW_SET instanceof Set)||reportRows.some(x=>!ENP_HUB_ACTIVE_REPORT_ROW_SET.has(x)))throw new Error('REPORT_ONLY_WORKER_SCOPE_REQUIRED');
   const safeLimit=Number(options&&options.maxTimeMs),maxTimeMs=Number.isFinite(safeLimit)&&safeLimit>0
    ?Math.min(180000,Math.max(10000,safeLimit)):180000;
  const props=PropertiesService.getScriptProperties(),started=Date.now(),pause=Number(props.getProperty('HUB_ENP_PAUSE_UNTIL')||0);
@@ -328,7 +344,7 @@ function enp_hubRunEligibleRows_(reportRows,options) {
   for(;row<=grid.length&&Date.now()-started<maxTimeMs;row++){
    const values=grid[row-1];if(Array.isArray(reportRows)&&reportRows.indexOf(row)<0)continue;
    if(!enp_hubHasData_(values,h)||enp_guardUpper_(values[h['Workflow Status']])==='COMPLETED'||enp_hubIsHeld_(values[h['Workflow Status']]))continue;
-   let plan;try{plan=enp_hubAutomaticPlan_(grid,row);}catch(e){
+   let plan;try{const existing=enp_hubExactLiveItemCached_(values[h['Item Number']]);plan=enp_hubAutomaticPlan_(grid,row,existing);}catch(e){
     const reason=String(e.message||e);
     const currentStatus=enp_guardUpper_(values[h['Workflow Status']]);
     const previousReason=String(values[h['Review Reason']]||'').trim();
@@ -869,14 +885,14 @@ function enp_guardNorm_(value) {
   return String(value == null ? '' : value).trim();
 }
 
-function enp_hubAutomaticPlan_(grid,rowNumber) {
+function enp_hubAutomaticPlan_(grid,rowNumber,verifiedExistingItem) {
  const mapped=enp_hubRowRecord_(grid,rowNumber),r=mapped.record;
  if(enp_hubIsHeld_(r['Workflow Status']))throw new Error('Row is explicitly on HOLD');
  const candidate=grid.slice(),row=grid[rowNumber-1].slice();
  row[mapped.col['Create Authorized']]=true;
  if(enp_guardUpper_(r.Source)==='QUOTED')row[mapped.col['Quoted Authorization']]=true;
  candidate[rowNumber-1]=row;
- const plan=enp_hubPlanRow_(candidate,rowNumber);
+ const plan=enp_hubPlanRow_(candidate,rowNumber,verifiedExistingItem);
  plan.autoValidated=true;plan.fingerprint=enp_hubFingerprint_(r);
  return plan;
 }
@@ -932,7 +948,8 @@ function enp_hubExecuteRow_(rowNumber) {
  const sheet=enp_guardHubBook_().getSheetByName('ENTERNEWPART');
  let plan=null,itemId=null;
  try {
-  plan=enp_hubAutomaticPlan_(sheet.getDataRange().getValues(),rowNumber);ENP_HUB_ACTIVE_PLAN=plan;
+  const verifiedExisting=enp_hubExactLiveItemCached_(sheet.getRange(rowNumber,2).getValue());
+  plan=enp_hubAutomaticPlan_(sheet.getDataRange().getValues(),rowNumber,verifiedExisting);ENP_HUB_ACTIVE_PLAN=plan;
   let target=null,so=null;
   // SO verification precedes catalog lookup and any write.
   if(plan.soId){
@@ -942,7 +959,7 @@ function enp_hubExecuteRow_(rowNumber) {
    if(String(so.orderNumber!=null?so.orderNumber:so.OrderNumber)!==String(plan.record['Sales Order Number']))throw new Error('Live SO number mismatch');
    enp_hubCheckRequiredFields_(so,plan.record['Review Reason']);
   }
-  const existing=enp_legacyExactLookupNow_(plan.record['Item Number']);
+  const existing=verifiedExisting;
   itemId=existing?enp_guardItemId_(existing):null;
   if(plan.soId){
    target=enp_findTargetPlaceholderLine_(enp_getSalesOrderLineItems_(so),{desiredItemNumber:plan.record['Item Number'],desiredQty:plan.quantity,newItemId:itemId,expectedDescription:plan.record['Original Description'],expectedPrice:plan.linePrice});
@@ -951,16 +968,20 @@ function enp_hubExecuteRow_(rowNumber) {
    const price=enp_verificationNumber_(target.price!=null?target.price:target.Price);
    if(qty!==plan.quantity||price!==plan.linePrice)throw new Error('Live SO quantity or line price changed');
   }
-  const base=enp_buildItemPayloadFromSheetRow_([plan.record['Item Number'],plan.baseName,plan.price,plan.cost],{NewItemNumber:0,NewItemName:1,NewItemPrice:2,NewItemCost:3});
-  base.Name=plan.record['Item Name'];base.Description=plan.record.Description||base.Name;
-  if(!existing){
+  let resolved;
+  if(existing){
+   itemId=enp_guardItemId_(existing);
+   resolved={status:'EXISTS',id:itemId};
+  }else{
+   const base=enp_buildItemPayloadFromSheetRow_([plan.record['Item Number'],plan.baseName,plan.price,plan.cost],{NewItemNumber:0,NewItemName:1,NewItemPrice:2,NewItemCost:3});
+   base.Name=plan.record['Item Name'];base.Description=plan.record.Description||base.Name;
    enp_hubHydrateCreateReferences_(plan.record,base);
-   // Validate all write fields before setting READY or reaching item POST.
    enp_guardBuildHubCreatePayload_(base);
-   enp_hubWriteStatus_(sheet,plan,'READY','Authorized automatic exact lookup completed; creating item.');
+   enp_hubWriteStatus_(sheet,plan,'READY','Metadata verified; creating item with duplicate guard.');
+   if(plan.soId)enp_soDefaultInventoryLocationId_();
+   resolved=enp_guardCreateOrResolveItem_(base);
+   itemId=Number(resolved.id);
   }
-  if(plan.soId)enp_soDefaultInventoryLocationId_();
-  const resolved=enp_guardCreateOrResolveItem_(base);itemId=Number(resolved.id);
   if(!Number.isSafeInteger(itemId)||itemId<=0)throw new Error('Invalid resolved Item ID');
   enp_hubPersistItemId_(sheet,plan,itemId);
   const verified=enp_legacyLiveItem_(itemId);
@@ -1617,7 +1638,7 @@ function enp_hubCanOmitCost_(record) {
  });
 }
 
-function enp_hubPlanRow_(grid,rowNumber) {
+function enp_hubPlanRow_(grid,rowNumber,verifiedExistingItem) {
  const mapped=enp_hubRowRecord_(grid,rowNumber),r=mapped.record,source=enp_guardUpper_(r.Source);
  if(!(ENP_HUB_ACTIVE_REPORT_ROW_SET instanceof Set)||!ENP_HUB_ACTIVE_REPORT_ROW_SET.has(rowNumber))throw new Error('CURRENT_REPORT_SCOPE_REQUIRED');
  if(r['Create Authorized']!==true)throw new Error('Create Authorized must be TRUE');
@@ -1626,6 +1647,8 @@ function enp_hubPlanRow_(grid,rowNumber) {
  const sku=enp_guardNorm_(r['Item Number']),name=enp_guardCanonicalName_(r['Item Name'],sku);
  if(name!==r['Item Name'])throw new Error('Item Name must be Item Name (Item Number)');
  const price=enp_verificationNumber_(r.Price),cost=enp_verificationNumber_(r.Cost);
+ if(verifiedExistingItem&&enp_guardUpper_(enp_guardItemNumber_(verifiedExistingItem))!==enp_guardUpper_(sku))throw new Error('LIVE_EXISTING_ITEM_NUMBER_CONFLICT');
+ if(!verifiedExistingItem){
  if(price===null||price<0||(cost!==null&&cost<0))throw new Error('Nonnegative catalog Price and Cost required');
  const costOmitted=cost===null;
  if(costOmitted&&!enp_hubCanOmitCost_(r))throw new Error('Catalog Cost missing but a matching vendor discount exists or cost is invalid');
@@ -1636,6 +1659,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
  if(enp_guardUpper_(r['Serial Number Tracking'])!=='NO')throw new Error('Serial tracking YES requires a verified API write path; review required');
  if(r['MAP Price']!=null&&r['MAP Price']!=='')throw new Error('MAP Price requires a verified API write path; review required');
  if(r.UPC!=null&&r.UPC!==''&&typeof r.UPC!=='string')throw new Error('UPC must be text');
+ }
  const soId=source==='MANUAL'?null:Number(r['SO Internal ID']);
  let qty=null,linePrice=null;
  if(source==='MANUAL') {
@@ -1645,6 +1669,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
    qty=enp_verificationNumber_(r.Quantity);linePrice=enp_verificationNumber_(r['SO Line Price']);
    if(qty===null||qty<=0||linePrice===null||linePrice<0)throw new Error('SO quantity and line price required');
    if(!enp_lineDescriptionMatchesExactItemNumber_(r['Original Description'],sku))throw new Error('Original SO description does not identify the exact reviewed Item Number');
+   if(/\b(?:please confirm|to be confirmed)\b/i.test(String(r['Original Description']||'')))throw new Error('SOURCE_PRICE_UNCONFIRMED: Confirm the original Sales Order price before replacement');
  }
  // Same SKU on different orders is permitted only with consistent catalog data.
  // Same-SKU comparison is confined to report-active rows; backlog must not block them.
@@ -1658,7 +1683,7 @@ function enp_hubPlanRow_(grid,rowNumber) {
  });
  const fingerprint=enp_hubFingerprint_(r);
  return {rowNumber:rowNumber,record:r,col:mapped.col,source:source,soId:soId,quantity:qty,linePrice:linePrice,
- price:price,cost:cost,costOmitted:costOmitted,baseName:name.slice(0,-(' ('+sku+')').length),fingerprint:fingerprint};
+ price:price,cost:cost,costOmitted:costOmitted,existingLiveItemId:verifiedExistingItem?enp_guardItemId_(verifiedExistingItem):null,baseName:name.slice(0,-(' ('+sku+')').length),fingerprint:fingerprint};
 }
 
 function enp_hubFingerprint_(r) {
@@ -3183,6 +3208,7 @@ return {enp_runHubRow2CreateAndReplace,enp_previewHubRow2CreateAndReplace,enp_re
 
 // Scope is invocation-local. Never persist stale row IDs as execution authority.
 let ENP_HUB_ACTIVE_REPORT_ROW_SET=null;
+let ENP_HUB_EXACT_ITEM_CACHE=null;
 /* Google Apps Script — Central Hub manual controls and Toronto business-hour schedule. */
 function hub_previewEnternewpartAutomation() {
  const refresh=hub_refreshEnternewpartReport();
@@ -3192,6 +3218,7 @@ function hub_previewEnternewpartAutomation() {
   }));
  const scope=hub_enpPendingQueueRows_(refresh.activeRows);
  ENP_HUB_ACTIVE_REPORT_ROW_SET=new Set(scope.rows);
+ ENP_HUB_EXACT_ITEM_CACHE=Object.create(null);
  try {
   const result=hub_row2LegacyEngine_().enp_hubPreviewAllRows_(scope.rows);
   result.reportRefresh={reportRows:refresh.reportRows,inserted:refresh.inserted,
@@ -3200,7 +3227,7 @@ function hub_previewEnternewpartAutomation() {
    eligible:result.eligible,review:result.review,held:result.held,
    sample:(result.results||[]).filter(x=>x.status==='REVIEW'||x.status==='HOLD').slice(0,12)}));
   return result;
- }finally{ENP_HUB_ACTIVE_REPORT_ROW_SET=null;}
+ }finally{ENP_HUB_ACTIVE_REPORT_ROW_SET=null;ENP_HUB_EXACT_ITEM_CACHE=null;}
 }
 // Refresh and reconcile the live ENTERNEWPART report without moving stored rows.
 // Fill only missing plain cells when existing item or explicit product-family rules agree.
@@ -3634,6 +3661,7 @@ function hub_runEnternewpartReportWorker_() {
  const scope=hub_enpPendingQueueRows_(before.activeRows);
  if(ENP_HUB_ACTIVE_REPORT_ROW_SET!==null)throw new Error('REPORT_SCOPE_ALREADY_ACTIVE');
  ENP_HUB_ACTIVE_REPORT_ROW_SET=new Set(scope.rows);
+ ENP_HUB_EXACT_ITEM_CACHE=Object.create(null);
  try{
   const deadline=started+85000;
   let research={status:'NO_CURRENT_PLACEHOLDERS',researched:0,published:0};
@@ -3668,7 +3696,7 @@ function hub_runEnternewpartReportWorker_() {
   result.queue=hub_enpQueueStatusSummary_(); // Readback summary, NOT an execution input.
   result.elapsedMillis=Date.now()-started;
   return result;
- }finally{ENP_HUB_ACTIVE_REPORT_ROW_SET=null;}
+ }finally{ENP_HUB_ACTIVE_REPORT_ROW_SET=null;ENP_HUB_EXACT_ITEM_CACHE=null;}
 }
 
 function hub_enpQueueStatusSummary_() {
