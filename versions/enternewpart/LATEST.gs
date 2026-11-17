@@ -1,6 +1,6 @@
 /**
  * ENTERNEWPART — consolidated script (Google Apps Script V8)
- * Version 2026-11-17-R6.1 (current-report-only, live-item-first).
+ * Version 2026-11-17-R6.2 (current-report-only, live-item-first).
  *
  * The ONLY public execution handler is hub_enternewpartEndToEnd (manual run and the three
  * Toronto daily trigger slots). Dependencies (unchanged): 00_Config.gs and
@@ -1471,9 +1471,11 @@ function hub_enpBuildEngine_() {
   }
   // One-shot safety net: if the run dies between bridge and restore, this trigger restores the master ~2 minutes later.
   function enp_scheduleItemGroupBridgeWatchdog_() {
+    // Replace any earlier watchdog trigger (a fired one-time trigger stays listed as Disabled and would otherwise
+    // block a new one). A fresh trigger covers every pending journal, including older ones.
     const handler = 'hub_recoverItemGroupMasterBridgeWatchdog';
-    if (!ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction && t.getHandlerFunction() === handler))
-      ScriptApp.newTrigger(handler).timeBased().after(2 * 60 * 1000).create();
+    ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction && t.getHandlerFunction() === handler).forEach(t => ScriptApp.deleteTrigger(t));
+    ScriptApp.newTrigger(handler).timeBased().after(2 * 60 * 1000).create();
   }
 
   function enp_recoverItemGroupMasterBridgeWatchdog() {

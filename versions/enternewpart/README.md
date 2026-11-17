@@ -5,7 +5,8 @@ To confirm what is live: compare the first lines of the Apps Script file (`Versi
 
 | File | Version header | Date | Collected from | SHA-256 (12) | Status |
 |---|---|---|---|---|---|
-| `2026-11-17_R6.1.gs` / `LATEST.gs` | 2026-11-17-R6.1 (current-report-only, live-item-first) | 2026-11-17 | R6 + best of R5.1 | 84f9e515b4d0 | **LIVE** in the Central Hub project (since 2026-11-17 13:03) |
+| `2026-11-17_R6.2.gs` / `LATEST.gs` | 2026-11-17-R6.2 (current-report-only, live-item-first) | 2026-11-17 | R6.1 + Item Group watchdog fix | e068573c2408 | **LATEST — paste into Apps Script** (R6.1 stays LIVE until then) |
+| `2026-11-17_R6.1.gs` | 2026-11-17-R6.1 (current-report-only, live-item-first) | 2026-11-17 | R6 + best of R5.1 | 84f9e515b4d0 | **LIVE** in the Central Hub project (since 2026-11-17 13:03) |
 | `2026-11-17_R6_LIVE.gs` | 2026-11-16-R6 (current-report-only) | 2026-11-17 | `backup/live-hub-enternewpart-20261019` (89ba24a) | 71b6570735cd | Superseded by R6.1 |
 | `2026-11-11_R5_current-report-only.gs` | 2026-11-11-R5.1 (current-report-only, live-item-first) | 2026-11-11 | `fix/enp-current-report-only-20261111` (6efc2c4) | 315638e436f2 | Superseded (best parts merged into R6.1) |
 | `2026-11-11_R5_research-extraction.gs` | 2026-11-11-R5 (current-report-only) | 2026-11-11 | `fix/enp-r5-research-extraction-20261111` (96634e3) | d05748c3a5aa | Superseded (base of R6) |
@@ -17,6 +18,9 @@ Earlier, multi-file era (not copied here, already in this branch / their branche
 - 2026-10-19 Hub design: `docs/ENTERNEWPART_HUB_DESIGN.md` on `design/enternewpart-hub-20261019`
 - 2026-10-19 staged autonomy prototype: `staged/enternewpart/` on `work/enternewpart-automation-20261019`
 - 2026-10-20 repairs (cost, description, parity, legacy execution): `repairs/` on `work/enternewpart-consolidation-20261028`
+
+## R6.2
+- Item Group bridge: each save now replaces any earlier watchdog trigger (a fired one stays listed as Disabled and previously blocked a new safety check).
 
 ## R6.1 = R6 + the best of R5.1
 - **From R5.1:** live-item-first (an SO line whose SKU already exists in Striven is replaced with that item without new-item metadata; the line shows the item's own description) and category-only transfer from exact catalog product-name matches.
