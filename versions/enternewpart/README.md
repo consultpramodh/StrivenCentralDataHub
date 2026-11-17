@@ -5,8 +5,8 @@ To confirm what is live: compare the first lines of the Apps Script file (`Versi
 
 | File | Version header | Date | Collected from | SHA-256 (12) | Status |
 |---|---|---|---|---|---|
-| `2026-11-17_R6.1.gs` / `LATEST.gs` | 2026-11-17-R6.1 (current-report-only, live-item-first) | 2026-11-17 | R6 + best of R5.1 | 84f9e515b4d0 | **LATEST — deploy this** (becomes LIVE once pasted into Apps Script) |
-| `2026-11-17_R6_LIVE.gs` | 2026-11-16-R6 (current-report-only) | 2026-11-17 | `backup/live-hub-enternewpart-20261019` (89ba24a) | 71b6570735cd | LIVE until R6.1 is pasted |
+| `2026-11-17_R6.1.gs` / `LATEST.gs` | 2026-11-17-R6.1 (current-report-only, live-item-first) | 2026-11-17 | R6 + best of R5.1 | 84f9e515b4d0 | **LIVE** in the Central Hub project (since 2026-11-17 13:03) |
+| `2026-11-17_R6_LIVE.gs` | 2026-11-16-R6 (current-report-only) | 2026-11-17 | `backup/live-hub-enternewpart-20261019` (89ba24a) | 71b6570735cd | Superseded by R6.1 |
 | `2026-11-11_R5_current-report-only.gs` | 2026-11-11-R5.1 (current-report-only, live-item-first) | 2026-11-11 | `fix/enp-current-report-only-20261111` (6efc2c4) | 315638e436f2 | Superseded (best parts merged into R6.1) |
 | `2026-11-11_R5_research-extraction.gs` | 2026-11-11-R5 (current-report-only) | 2026-11-11 | `fix/enp-r5-research-extraction-20261111` (96634e3) | d05748c3a5aa | Superseded (base of R6) |
 | `2026-11-09_end-to-end-distribution.gs` | 2026-11-09-R4 | 2026-11-09 | `fix/enp-end-to-end-distribution-20261109` (8e108a3) | ef3715d00f6a | Superseded |
