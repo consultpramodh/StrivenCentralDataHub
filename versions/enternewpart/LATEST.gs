@@ -1,6 +1,6 @@
 /**
  * ENTERNEWPART — consolidated script (Google Apps Script V8)
- * Version 2026-11-17-R6.2 (current-report-only, live-item-first).
+ * Version 2026-11-17-R6.3 (current-report-only, live-item-first).
  *
  * The ONLY public execution handler is hub_enternewpartEndToEnd (manual run and the three
  * Toronto daily trigger slots). Dependencies (unchanged): 00_Config.gs and
@@ -2484,6 +2484,15 @@ function hub_enpQueueStatusSummary_() {
  * Pick hub_enternewpartEndToEnd in the Apps Script function picker, and use it as the handler for
  * the three Toronto scheduled trigger slots. Call with no arguments for a manual end-to-end run.
  */
+// Trigger targets named by their run time, so the Apps Script Triggers page shows when each one runs.
+const HUB_ENP_SLOT_HANDLERS = Object.freeze({ 10: 'hub_enternewpart_1000', 14: 'hub_enternewpart_1400', 16: 'hub_enternewpart_1600' });
+function hub_enternewpart_1000(event) { return hub_enpRunSlot_(event, 10); }
+function hub_enternewpart_1400(event) { return hub_enpRunSlot_(event, 14); }
+function hub_enternewpart_1600(event) { return hub_enpRunSlot_(event, 16); }
+function hub_enpRunSlot_(event, slot) {
+  return hub_enternewpartEndToEnd(Object.assign({}, event || {}, { triggerUid: (event && event.triggerUid) || 'slot-' + slot, enpSlot: slot }));
+}
+
 function hub_enternewpartEndToEnd(event) {
   const props = PropertiesService.getScriptProperties(), triggerUid = event && event.triggerUid, scheduled = !!triggerUid;
   // A paused automation is paused for manual runs too; no partial report writes.
@@ -2493,7 +2502,7 @@ function hub_enternewpartEndToEnd(event) {
     let mapping;
     try { mapping = JSON.parse(props.getProperty('HUB_ENP_SLOT_TRIGGERS_JSON') || '{}'); }
     catch (e) { throw new Error('Invalid ENTERNEWPART trigger mapping'); }
-    slot = Number(mapping[triggerUid]);
+    slot = Number(event.enpSlot || mapping[triggerUid]);
     if ([10, 14, 16].indexOf(slot) < 0) return { status: 'UNKNOWN_SCHEDULED_TRIGGER', processed: 0 };
     day = Utilities.formatDate(new Date(), 'America/Toronto', 'yyyy-MM-dd');
     if (hub_enpStateRead_().slots[slot] === day) return { status: 'ALREADY_RAN', slot, processed: 0 };
@@ -2605,11 +2614,12 @@ function hub_scheduleNextEnternewpartRun_() {
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   const created = [];
   try {
-    const zone = 'America/Toronto', hours = [10, 14, 16], handler = 'hub_enternewpartEndToEnd';
-    const previous = ScriptApp.getProjectTriggers().filter(t => ['hub_processEnternewpartAutomation', 'hub_enternewpartScheduledRun', handler].indexOf(t.getHandlerFunction()) >= 0);
+    const zone = 'America/Toronto', hours = [10, 14, 16];
+    const owned = ['hub_processEnternewpartAutomation', 'hub_enternewpartScheduledRun', 'hub_enternewpartEndToEnd'].concat(Object.values(HUB_ENP_SLOT_HANDLERS));
+    const previous = ScriptApp.getProjectTriggers().filter(t => owned.indexOf(t.getHandlerFunction()) >= 0);
     const byId = {};
     hours.forEach(hour => {
-      const t = ScriptApp.newTrigger(handler).timeBased().atHour(hour).nearMinute(0).everyDays(1).inTimezone(zone).create();
+      const t = ScriptApp.newTrigger(HUB_ENP_SLOT_HANDLERS[hour]).timeBased().atHour(hour).nearMinute(0).everyDays(1).inTimezone(zone).create();
       if (!t || !t.getUniqueId()) throw new Error('No trigger ID for slot ' + hour);
       created.push(t); byId[t.getUniqueId()] = hour;
     });
@@ -2619,7 +2629,7 @@ function hub_scheduleNextEnternewpartRun_() {
     PropertiesService.getScriptProperties().setProperty('HUB_ENP_SLOT_TRIGGERS_JSON', JSON.stringify(byId));
     previous.forEach(t => ScriptApp.deleteTrigger(t));
     PropertiesService.getScriptProperties().deleteProperty('HUB_ENP_NEXT_RUN_AT');
-    return { status: 'INSTALLED', timezone: zone, hours, recurrence: 'DAILY', nearMinuteTolerance: 15, triggerCount: created.length };
+    return { status: 'INSTALLED', timezone: zone, hours, handlers: hours.map(h => HUB_ENP_SLOT_HANDLERS[h]), recurrence: 'DAILY', nearMinuteTolerance: 15, triggerCount: created.length };
   } catch (err) {
     created.forEach(t => { try { ScriptApp.deleteTrigger(t); } catch (ignore) {} });
     throw err;
@@ -2638,7 +2648,8 @@ function hub_enableEnternewpartAutomation() {
 function hub_pauseEnternewpartAutomation() {
   const p = PropertiesService.getScriptProperties();
   p.setProperty('HUB_ENP_AUTOMATION_ENABLED', 'false');
-  const owned = ScriptApp.getProjectTriggers().filter(t => ['hub_enternewpartEndToEnd', 'hub_enternewpartScheduledRun', 'hub_processEnternewpartAutomation'].indexOf(t.getHandlerFunction()) >= 0);
+  const names = ['hub_enternewpartEndToEnd', 'hub_enternewpartScheduledRun', 'hub_processEnternewpartAutomation'].concat(Object.values(HUB_ENP_SLOT_HANDLERS));
+  const owned = ScriptApp.getProjectTriggers().filter(t => names.indexOf(t.getHandlerFunction()) >= 0);
   owned.forEach(t => ScriptApp.deleteTrigger(t));
   p.deleteProperty('HUB_ENP_SLOT_TRIGGERS_JSON');
   const result = { status: 'PAUSED', removedTriggers: owned.length, strivenCalls: 0 };
