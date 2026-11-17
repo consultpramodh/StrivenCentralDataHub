@@ -1,0 +1,8 @@
+[
+  {
+    "project": "HUB",
+    "file": "ENTERNEWPART.js",
+    "sha256": "71b6570735cd582aeb0a6432535a86d4f4d11495d41d0d6c303ae1fceb97ec3d",
+    "note": "ENTERNEWPART R6+ consolidated script as deployed to the Central Hub Apps Script project on 2026-11-17 (single handler hub_enternewpartEndToEnd)."
+  }
+]
