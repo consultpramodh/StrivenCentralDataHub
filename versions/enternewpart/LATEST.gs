@@ -1,6 +1,6 @@
 /**
  * ENTERNEWPART — consolidated script (Google Apps Script V8)
- * Version 2026-11-16-R6 (current-report-only).
+ * Version 2026-11-17-R6.1 (current-report-only, live-item-first).
  *
  * The ONLY public execution handler is hub_enternewpartEndToEnd (manual run and the three
  * Toronto daily trigger slots). Dependencies (unchanged): 00_Config.gs and
@@ -533,6 +533,36 @@ function hub_enpBuildEngine_() {
   }
   // Returns the live item for an exact Item Number, or null. Records the result in ITEM_LOOKUP_REQUESTS
   // (overwriting the newest row for that number, which also clears a stale PENDING entry).
+  // Read-only exact search in Striven (no sheet writes). Returns the live item or null.
+  function enp_searchExactLive_(number) {
+    const key = enp_upper_(number), found = {};
+    for (let page = 0; page < 3; page++) {
+      const response = enp_guardRawRequest_('POST', '/v1/items/search', { ItemNumber: number, PageIndex: page, PageSize: 1000 }, false);
+      if (!response.ok) throw new Error('Exact item lookup HTTP ' + response.code + '; no creation attempted');
+      const p = enp_searchPage_(response.body);
+      p.rows.forEach(item => {
+        if (enp_upper_(enp_guardItemNumber_(item)) !== key) return;
+        const id = enp_guardItemId_(item);
+        if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Exact item result missing ID');
+        found[id] = item;
+      });
+      const ids = Object.keys(found);
+      if (ids.length > 1) throw new Error('Multiple exact live item IDs; no creation allowed');
+      if (!p.rows.length && p.count !== null && page * 1000 < p.count) throw new Error('Premature empty item-search page');
+      if (p.count !== null ? (page + 1) * 1000 >= p.count : p.rows.length < 1000) return ids.length ? enp_liveItem_(Number(ids[0])) : null;
+    }
+    throw new Error('Exact item lookup exceeded three-page budget; no creation allowed');
+  }
+  // R5.1 live-item-first: one read-only lookup per distinct SKU per run (preview, worker, execution).
+  let ENP_HUB_EXACT_ITEM_CACHE = null;
+  function enp_exactLiveItemCached_(sku) {
+    const wanted = enp_upper_(sku);
+    if (!wanted || wanted === 'ENTERNEWPART' || !hub_descValidNumber_(wanted)) return null;
+    if (!ENP_HUB_EXACT_ITEM_CACHE) ENP_HUB_EXACT_ITEM_CACHE = Object.create(null);
+    if (!Object.prototype.hasOwnProperty.call(ENP_HUB_EXACT_ITEM_CACHE, wanted)) ENP_HUB_EXACT_ITEM_CACHE[wanted] = enp_searchExactLive_(enp_norm_(sku));
+    return ENP_HUB_EXACT_ITEM_CACHE[wanted];
+  }
+
   function enp_liveExactLookup_(number) {
     const key = enp_upper_(number), found = {};
     for (let page = 0; page < 3; page++) {
@@ -738,7 +768,7 @@ function hub_enpBuildEngine_() {
     if (!vendor) return false;
     return !hub_enpVendorRules_().some(r => enp_upper_(r.supplier) === vendor);
   }
-  function enp_hubPlanRow_(grid, rowNumber) {
+  function enp_hubPlanRow_(grid, rowNumber, existingItem) {
     const mapped = enp_hubRowRecord_(grid, rowNumber), r = mapped.record, source = enp_upper_(r.Source);
     if (!(ENP_HUB_ACTIVE_REPORT_ROW_SET instanceof Set) || !ENP_HUB_ACTIVE_REPORT_ROW_SET.has(rowNumber)) throw new Error('CURRENT_REPORT_SCOPE_REQUIRED');
     if (r['Create Authorized'] !== true) throw new Error('Create Authorized must be TRUE');
@@ -748,8 +778,11 @@ function hub_enpBuildEngine_() {
     const sku = enp_norm_(r['Item Number']), name = enp_guardCanonicalName_(r['Item Name'], sku);
     if (name !== r['Item Name']) throw new Error('Item Name must be Item Name (Item Number)');
     const price = enp_verificationNumber_(r.Price), cost = enp_verificationNumber_(r.Cost);
-    if (price === null || price < 0 || (cost !== null && cost < 0)) throw new Error('Nonnegative catalog Price and Cost required');
     const costOmitted = cost === null;
+    if (existingItem && enp_upper_(enp_guardItemNumber_(existingItem)) !== enp_upper_(sku)) throw new Error('LIVE_EXISTING_ITEM_NUMBER_CONFLICT');
+    // R5.1: an item that already exists in Striven is reused as is, so new-item catalog data is not required.
+    if (!existingItem) {
+    if (price === null || price < 0 || (cost !== null && cost < 0)) throw new Error('Nonnegative catalog Price and Cost required');
     if (costOmitted && !enp_hubCanOmitCost_(r)) throw new Error('Cost missing: ' + ((/^(BLOCKED|NO RULE)/.test(enp_norm_(r['Cost Basis'])) ? enp_norm_(r['Cost Basis']) : '') ||
       enp_norm_(r['Cost Calculation Status']) ||
       (enp_norm_(r['Preferred Vendor']) ? 'no discount rule matched; enter Cost or add a rule to ENP_VENDOR_RULES' : 'Preferred Vendor is needed to calculate cost')));
@@ -760,6 +793,7 @@ function hub_enpBuildEngine_() {
     if (enp_upper_(r['Serial Number Tracking']) !== 'NO') throw new Error('Serial tracking YES requires a verified API write path; review required');
     if (r['MAP Price'] != null && r['MAP Price'] !== '') throw new Error('MAP Price requires a verified API write path; review required');
     if (r.UPC != null && r.UPC !== '' && typeof r.UPC !== 'string') throw new Error('UPC must be text');
+    }
     const soId = source === 'MANUAL' ? null : Number(r['SO Internal ID']);
     let qty = null, linePrice = null;
     if (source === 'MANUAL') {
@@ -780,11 +814,12 @@ function hub_enpBuildEngine_() {
       });
     });
     return { rowNumber, record: r, col: mapped.col, source, soId, quantity: qty, linePrice, price, cost, costOmitted,
+      existingLiveItemId: existingItem ? enp_guardItemId_(existingItem) : null,
       baseName: name.slice(0, -(' (' + sku + ')').length), fingerprint: enp_hubFingerprint_(r) };
   }
   // Automatic plan. Unless HUB_ENP_REQUIRE_CREATE_AUTHORIZED is 'true', the authorization checkboxes are
   // treated as satisfied (R5 "AUTO_VALIDATED" behaviour); HOLD / PAUSED / DO NOT CREATE always stop a row.
-  function enp_hubAutomaticPlan_(grid, rowNumber) {
+  function enp_hubAutomaticPlan_(grid, rowNumber, existingItem) {
     const mapped = enp_hubRowRecord_(grid, rowNumber), r = mapped.record;
     if (enp_hubIsHeld_(r['Workflow Status'])) throw new Error('Row is explicitly on HOLD');
     const requireAuth = hub_enpProp_(ENP.PROPS.REQUIRE_CREATE_AUTHORIZED) === 'true';
@@ -796,7 +831,7 @@ function hub_enpBuildEngine_() {
       if (enp_upper_(r.Source) === 'QUOTED') row[mapped.col['Quoted Authorization']] = true;
       candidate[rowNumber - 1] = row;
     }
-    const plan = enp_hubPlanRow_(candidate, rowNumber);
+    const plan = enp_hubPlanRow_(candidate, rowNumber, existingItem);
     plan.autoValidated = !requireAuth;
     plan.fingerprint = enp_hubFingerprint_(r);
     return plan;
@@ -1605,7 +1640,9 @@ function hub_enpBuildEngine_() {
     const sheet = enp_hubSheet_();
     let plan = null, itemId = null;
     try {
-      plan = enp_hubAutomaticPlan_(sheet.getDataRange().getValues(), rowNumber);
+      const grid0 = sheet.getDataRange().getValues(), h0 = enp_indexByHeader_(grid0[0]);
+      const existing = enp_exactLiveItemCached_(grid0[rowNumber - 1][h0['Item Number']]);
+      plan = enp_hubAutomaticPlan_(grid0, rowNumber, existing);
       ENP_HUB_ACTIVE_PLAN = plan;
       let target = null, so = null;
       // SO verification precedes catalog lookup and any write.
@@ -1616,7 +1653,6 @@ function hub_enpBuildEngine_() {
         if (String(so.orderNumber != null ? so.orderNumber : so.OrderNumber) !== String(plan.record['Sales Order Number'])) throw new Error('Live SO number mismatch');
         enp_hubCheckRequiredFields_(so, plan.record['Review Reason']);
       }
-      const existing = enp_liveExactLookup_(plan.record['Item Number']);
       itemId = existing ? enp_guardItemId_(existing) : null;
       if (plan.soId) {
         target = enp_findTargetPlaceholderLine_(enp_getSalesOrderLineItems_(so), { desiredItemNumber: plan.record['Item Number'], desiredQty: plan.quantity,
@@ -1624,16 +1660,31 @@ function hub_enpBuildEngine_() {
         if (!target) throw new Error('No unique exact live SO line; stopped before creation');
         if (enp_lineQty_(target) !== plan.quantity || enp_linePrice_(target) !== plan.linePrice) throw new Error('Live SO quantity or line price changed');
       }
-      const base = enp_buildItemPayload_(plan.record['Item Number'], plan.baseName, plan.price, plan.cost);
-      base.Name = plan.record['Item Name'];
-      base.Description = plan.record.Description || base.Name;
-      if (!existing) {
+      let resolved;
+      if (existing) {
+        if (plan.soId) enp_soDefaultInventoryLocationId_();
+        resolved = { status: 'EXISTS', id: itemId, item: existing };
+      } else {
+        // Fresh check right before creating: records the result for the duplicate guard and catches an item
+        // created since the plan was made.
+        const fresh = enp_liveExactLookup_(plan.record['Item Number']);
+        if (fresh) {
+          itemId = enp_guardItemId_(fresh);
+          if (plan.soId) enp_soDefaultInventoryLocationId_();
+          resolved = { status: 'EXISTS', id: itemId, item: fresh };
+        }
+      }
+      if (!resolved) {
+        const base = enp_buildItemPayload_(plan.record['Item Number'], plan.baseName, plan.price, plan.cost);
+        base.Name = plan.record['Item Name'];
+        base.Description = plan.record.Description || base.Name;
         enp_hydrateReferences_(plan.record, base);
         enp_guardBuildHubCreatePayload_(base); // validate every write field before READY / item POST
-        enp_hubWriteStatus_(sheet, plan, 'READY', 'Authorized automatic exact lookup completed; creating item.');
+        enp_hubWriteStatus_(sheet, plan, 'READY', 'Metadata verified; creating item with duplicate guard.');
+        if (plan.soId) enp_soDefaultInventoryLocationId_();
+        resolved = enp_guardCreateOrResolveItem_(base);
+        if (ENP_HUB_EXACT_ITEM_CACHE) ENP_HUB_EXACT_ITEM_CACHE[enp_upper_(plan.record['Item Number'])] = enp_liveItem_(Number(resolved.id));
       }
-      if (plan.soId) enp_soDefaultInventoryLocationId_();
-      const resolved = enp_guardCreateOrResolveItem_(base);
       itemId = Number(resolved.id);
       if (!Number.isSafeInteger(itemId) || itemId <= 0) throw new Error('Invalid resolved Item ID');
       enp_hubPersistItemId_(sheet, plan, itemId);
@@ -1647,13 +1698,15 @@ function hub_enpBuildEngine_() {
       }
       enp_hubWriteStatus_(sheet, plan, 'ITEM READY', 'Verified Item ID ' + itemId + '; replacing exact SO line and verifying CF820.');
       const result = enp_replaceSalesOrderItems_(plan.soId, [{ key: 'HUB_ROW_' + rowNumber, lineId: enp_lineId_(target), desiredItemNumber: plan.record['Item Number'],
-        desiredItemName: plan.baseName, desiredDescription: enp_norm_(plan.record.Description) || plan.record['Item Name'],
+        desiredItemName: plan.baseName,
+        // Reused item: show the item's own Striven description; new item: the reviewed row description.
+        desiredDescription: (existing && enp_norm_(enp_pick_(enp_guardUnwrapItem_(existing) || {}, ['description', 'Description']))) || enp_norm_(plan.record.Description) || plan.record['Item Name'],
         desiredPrice: plan.linePrice, desiredQty: plan.quantity, newItemId: itemId, expectedSoStatus: plan.source,
         expectedDescription: plan.record['Original Description'], expectedPrice: plan.linePrice }]);
       if (!result || !Array.isArray(result.replacements) || result.replacements.length !== 1) throw new Error('SO replacement did not return one verified line');
       enp_hubWriteStatus_(sheet, plan, 'COMPLETED', 'Verified Item ID ' + itemId + '; SO ' + plan.soId + ' line ' + result.replacements[0].lineId +
         ' replaced; Qty ' + plan.quantity + ' and line price ' + plan.linePrice + ' preserved; CF820 updated only when all placeholders resolved.' +
-        (plan.costOmitted ? ' Cost omitted; Striven may default it to zero.' : ''));
+        (existing ? ' Existing Striven item reused.' : plan.costOmitted ? ' Cost omitted; Striven may default it to zero.' : ''));
       return { status: 'COMPLETED', row: rowNumber, itemId, itemResolution: resolved.status, salesOrderId: plan.soId };
     } catch (e) {
       if (plan) {
@@ -1668,6 +1721,7 @@ function hub_enpBuildEngine_() {
   /* ---------- scoped preview / worker ---------- */
 
   function enp_hubPreviewAllRows_(reportRows) {
+    ENP_HUB_EXACT_ITEM_CACHE = Object.create(null); // fresh live lookups for this run
     if (!Array.isArray(reportRows)) throw new Error('CURRENT_REPORT_SCOPE_REQUIRED_FOR_PREVIEW');
     const reportSet = new Set(reportRows.filter(Number.isSafeInteger));
     const grid = enp_hubSheet_().getDataRange().getValues(), results = [], h = enp_indexByHeader_(grid[0]);
@@ -1676,7 +1730,11 @@ function hub_enpBuildEngine_() {
       const values = grid[row - 1];
       if (!enp_hubHasData_(values, h)) continue;
       if (enp_upper_(values[h['Workflow Status']]) === 'COMPLETED') { results.push({ row, status: 'COMPLETED' }); continue; }
-      try { const plan = enp_hubAutomaticPlan_(grid, row); results.push({ row, status: 'ELIGIBLE', itemNumber: plan.record['Item Number'] }); }
+      try {
+        const existing = enp_exactLiveItemCached_(values[h['Item Number']]);
+        const plan = enp_hubAutomaticPlan_(grid, row, existing);
+        results.push({ row, status: 'ELIGIBLE', itemNumber: plan.record['Item Number'], itemResolution: existing ? 'EXISTING_VERIFIED' : 'NEW_WITH_FULL_METADATA' });
+      }
       catch (e) { results.push({ row, status: enp_hubIsHeld_(values[h['Workflow Status']]) ? 'HOLD' : 'REVIEW', reason: String(e.message || e) }); }
     }
     const count = s => results.filter(r => r.status === s).length;
@@ -1684,6 +1742,7 @@ function hub_enpBuildEngine_() {
   }
 
   function enp_hubRunEligibleRows_(reportRows, options) {
+    ENP_HUB_EXACT_ITEM_CACHE = Object.create(null); // fresh live lookups for this run
     if (!Array.isArray(reportRows)) throw new Error('CURRENT_REPORT_SCOPE_REQUIRED');
     const safeLimit = Number(options && options.maxTimeMs);
     const maxTimeMs = Number.isFinite(safeLimit) && safeLimit > 0 ? Math.min(180000, Math.max(10000, safeLimit)) : 180000;
@@ -1707,7 +1766,7 @@ function hub_enpBuildEngine_() {
         const values = grid[row - 1];
         if (!enp_hubHasData_(values, h) || enp_upper_(values[h['Workflow Status']]) === 'COMPLETED' || enp_hubIsHeld_(values[h['Workflow Status']])) continue;
         let plan;
-        try { plan = enp_hubAutomaticPlan_(grid, row); }
+        try { plan = enp_hubAutomaticPlan_(grid, row, enp_exactLiveItemCached_(values[h['Item Number']])); }
         catch (e) {
           const reason = String(e.message || e), currentStatus = enp_upper_(values[h['Workflow Status']]);
           const previousReason = String(values[h['Review Reason']] || '').trim();
@@ -2226,6 +2285,15 @@ function hub_enpEnrichmentPlan_(record, catalog, rules) {
     if (!norm(record.Manufacturer)) result.Manufacturer = 'SBI - Stove Builder International inc.';
     if (!norm(record['Research URL'])) result['Research URL'] = known.url;
   }
+  // R5.1: a new SKU with exactly the same product name as existing catalog items takes their CATEGORY only, and only
+  // when every matching item agrees on one category. Item ID, vendor, manufacturer, cost and price are never copied.
+  if (!norm(record['Item Category']) && !result['Item Category']) {
+    const base = String(record['Item Name'] || '').trim(), suffix = ' (' + sku + ')';
+    const wantedName = (base.toUpperCase().endsWith(suffix) ? base.slice(0, -suffix.length) : base).replace(/\s+/g, ' ').trim().toUpperCase();
+    const byName = wantedName ? catalog.filter(x => norm(String(x.ItemName || '').replace(/\s+/g, ' ')) === wantedName && Number(x.Id) > 0) : [];
+    const cats = [...new Set(byName.map(x => String(x.ItemCategory || '').trim()).filter(Boolean))];
+    if (byName.length && cats.length === 1) result['Item Category'] = cats[0];
+  }
   if (!norm(record['Preferred Vendor']) && !result['Preferred Vendor']) {
     const words = v => norm(v).replace(/[^A-Z0-9]+/g, ' ').trim();
     const text = ' ' + words([record['Item Name'], record.Description, record.Manufacturer, record['Original Description'],
@@ -2243,7 +2311,7 @@ function hub_enpEnrichReportRows_(sheet, activeRows) {
   const records = catalogSheet.getDataRange().getValues(), col = {};
   (records[0] || []).forEach((k, i) => { col[k] = i; });
   if (['ItemNumber', 'Id', 'ItemCategory', 'PreferredVendor', 'Manufacturer'].some(k => col[k] === undefined)) return 0;
-  const catalog = records.slice(1).map(r => ({ ItemNumber: r[col.ItemNumber], Id: r[col.Id], ItemCategory: r[col.ItemCategory], PreferredVendor: r[col.PreferredVendor], Manufacturer: r[col.Manufacturer] }));
+  const catalog = records.slice(1).map(r => ({ ItemNumber: r[col.ItemNumber], Id: r[col.Id], ItemName: col.ItemName == null ? '' : r[col.ItemName], ItemCategory: r[col.ItemCategory], PreferredVendor: r[col.PreferredVendor], Manufacturer: r[col.Manufacturer] }));
   const rg = rulesSheet.getDataRange().getValues(), rh = rg[0] || [], v = rh.indexOf('Supplier Name (Info!B)'), f = rh.indexOf('Product Family (Info!C)');
   if (v < 0 || f < 0) return 0;
   const rules = rg.slice(1).map(r => ({ supplier: r[v], family: r[f] }));
