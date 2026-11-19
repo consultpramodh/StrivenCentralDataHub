@@ -3221,3 +3221,152 @@ function hub_probePoDataContracts() {
   } finally { lock.releaseLock(); }
 }
 /* === HUB_PO_DATA_CONTRACT_PROBE_R1_END === */
+
+/* === HUB_STATEMENT_PROBE_R1 === */
+/**
+ * Customer Statements: read-only data probe (docs/CUSTOMER_STATEMENTS_DESIGN.md §4).
+ * Manual execution. Set Script Property STATEMENT_PROBE_CUSTOMER_IDS = "52933,12345,...".
+ * Only GET and search POST calls; no Striven writes.
+ * Writes STMT_PROBE_SUMMARY, STMT_PROBE_MISMATCH and STMT_PROBE_RAW tabs.
+ */
+function hub_probeCustomerStatements() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('Statement probe already running.');
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const ids = String(props.getProperty('STATEMENT_PROBE_CUSTOMER_IDS') || '')
+      .split(',').map(function(s) { return Number(String(s).trim()); })
+      .filter(function(n) { return Number.isInteger(n) && n > 0; });
+    if (!ids.length) throw new Error('Set Script Property STATEMENT_PROBE_CUSTOMER_IDS (comma-separated customer IDs).');
+    const clientId = String(props.getProperty('CLIENT_ID') || props.getProperty('STRIVEN_CLIENT_ID') || '').trim();
+    const clientSecret = String(props.getProperty('CLIENT_SECRET') || props.getProperty('STRIVEN_CLIENT_SECRET') || '').trim();
+    if (!clientId || !clientSecret) throw new Error('Missing Striven API credentials.');
+    const token = hub_strivenAccessToken_(clientId, clientSecret).accessToken;
+
+    const summary = [], mismatch = [], raw = [];
+    ids.forEach(function(customerId) {
+      const r = hub_stmtProbeCustomer_(token, customerId);
+      summary.push(r.summaryRow);
+      r.mismatches.forEach(function(m) { mismatch.push(m); });
+      r.raw.forEach(function(x) { raw.push(x); });
+    });
+
+    const ss = SpreadsheetApp.getActive();
+    hub_writeTableSheet_(ss, 'STMT_PROBE_SUMMARY', [
+      'Snapshot', 'Customer ID', 'Customer Name', 'Customer #', 'Invoices', 'Payments', 'Credit Memos', 'Sales Orders',
+      'Open Invoices (Σ OpenBalance)', 'Unapplied Payments', 'Open Credits', 'Total Due',
+      'Invoice Rebuild Mismatches', 'Possible Deposits (unapplied payments)', 'Invoices Linked To Order',
+      'Change Orders', 'Historical Non-posting', 'Invoice Statuses', 'Payment Statuses', 'Credit Memo Statuses',
+      'Sales Order Statuses', 'Deposit Candidates (JSON)', 'HTTP Errors'
+    ], summary);
+    hub_writeTableSheet_(ss, 'STMT_PROBE_MISMATCH', [
+      'Customer ID', 'Invoice ID', 'Invoice #', 'Status', 'Invoice Total', 'Applied (payments + credits)',
+      'Rebuilt Open', 'Striven OpenBalance', 'Difference'
+    ], mismatch);
+    hub_writeTableSheet_(ss, 'STMT_PROBE_RAW', ['Customer ID', 'Record Type', 'Record ID', 'JSON'], raw);
+
+    const errors = summary.reduce(function(a, row) { return a + Number(row[row.length - 1] || 0); }, 0);
+    return { status: errors ? 'PARTIAL' : 'PASS', customers: ids.length, mismatches: mismatch.length, httpErrors: errors, strivenWritesPerformed: false };
+  } finally { lock.releaseLock(); }
+}
+
+function hub_stmtProbeCustomer_(token, customerId) {
+  const base = 'https://api.striven.com';
+  const headers = { Authorization: 'Bearer ' + token, Accept: 'application/json' };
+  let httpErrors = 0;
+  const parse = function(resp, label) {
+    const code = resp.getResponseCode();
+    if (code < 200 || code >= 300) { httpErrors++; hub_log_('WARN', 'STATEMENT_PROBE', label, 'HTTP ' + code, hub_safeExternalText_(resp.getContentText(), 500)); return null; }
+    try { return JSON.parse(resp.getContentText()); } catch (e) { httpErrors++; return null; }
+  };
+  const idOf = function(x) { return x ? (x.Id !== undefined ? x.Id : x.id) : undefined; };
+  const money = function(n) { return Math.round((Number(n) || 0) * 100) / 100; };
+  const status = function(x) { const s = x && (x.Status !== undefined ? x.Status : x.status); return s && typeof s === 'object' ? String(s.Name || s.name || s.Id || '') : String(s === undefined || s === null ? '' : s); };
+  const uniq = function(arr) { return arr.filter(function(v, i) { return arr.indexOf(v) === i; }).join(', '); };
+
+  // Paged search. PageIndex base (0 vs 1) is unconfirmed, so dedupe by Id and stop when no new rows arrive.
+  const searchAll = function(path) {
+    const seen = {}, out = [];
+    for (let page = 0; page < 100; page++) {
+      const resp = UrlFetchApp.fetch(base + path, {
+        method: 'post', headers: headers, contentType: 'application/json', muteHttpExceptions: true,
+        payload: JSON.stringify({ CustomerId: customerId, PageIndex: page, PageSize: 100 })
+      });
+      const r = parse(resp, path);
+      if (!r) break;
+      const data = r.Data || r.data || [];
+      let added = 0;
+      data.forEach(function(x) { const id = idOf(x); if (id !== undefined && !seen[id]) { seen[id] = true; out.push(x); added++; } });
+      const total = Number(r.TotalCount !== undefined ? r.TotalCount : r.totalCount) || 0;
+      if (!data.length || !added || out.length >= total) break;
+    }
+    return out;
+  };
+  // Detail GETs in batches of 20 to stay within execution time.
+  const detailAll = function(kind, rows) {
+    const out = [];
+    for (let i = 0; i < rows.length; i += 20) {
+      const reqs = rows.slice(i, i + 20).map(function(x) { return { url: base + '/v1/' + kind + '/' + idOf(x), method: 'get', headers: headers, muteHttpExceptions: true }; });
+      UrlFetchApp.fetchAll(reqs).forEach(function(resp, j) { const d = parse(resp, kind + '/' + idOf(rows[i + j])); if (d) out.push(d); });
+    }
+    return out;
+  };
+
+  const customer = parse(UrlFetchApp.fetch(base + '/v1/customers/' + customerId, { method: 'get', headers: headers, muteHttpExceptions: true }), 'customers/' + customerId) || {};
+  const invS = searchAll('/v1/invoices/search');
+  const pmtS = searchAll('/v1/payments/search');
+  const cmS = searchAll('/v1/credit-memos/search');
+  const soS = searchAll('/v1/sales-orders/search');
+  const invoices = detailAll('invoices', invS);
+  const payments = detailAll('payments', pmtS);
+  const creditMemos = detailAll('credit-memos', cmS);
+  const salesOrders = detailAll('sales-orders', soS);
+
+  // Gap 3: rebuild each invoice's open balance from payment and credit-memo applications.
+  const applied = {};
+  payments.concat(creditMemos).forEach(function(src) {
+    (src.AppliedToInvoices || []).forEach(function(a) { applied[a.TxnId] = money((applied[a.TxnId] || 0) + Number(a.Amount || 0)); });
+  });
+  const totals = {};
+  invS.forEach(function(s) { totals[idOf(s)] = s.InvoiceTotal; });
+  const mismatches = [];
+  invoices.forEach(function(inv) {
+    const total = totals[inv.Id];
+    if (total === undefined) return;
+    const rebuilt = money(Number(total) - (applied[inv.Id] || 0));
+    const striven = money(inv.OpenBalance);
+    if (Math.abs(rebuilt - striven) >= 0.01) {
+      mismatches.push([customerId, inv.Id, inv.TxnNumber, status(inv), money(total), applied[inv.Id] || 0, rebuilt, striven, money(rebuilt - striven)]);
+    }
+  });
+
+  const sum = function(arr, f) { return money(arr.reduce(function(a, x) { return a + (Number(f(x)) || 0); }, 0)); };
+  const openInvoices = sum(invoices, function(i) { return i.OpenBalance; });
+  const unapplied = sum(payments, function(p) { return p.UnappliedAmount; });
+  const openCredits = sum(creditMemos, function(c) { return c.OpenBalance; });
+  const deposits = payments.filter(function(p) { return Number(p.UnappliedAmount) > 0; }).map(function(p) {
+    return { id: p.Id, date: p.TxnDate, ref: p.ReferenceNumber, unapplied: p.UnappliedAmount, memo: p.Memo, notes: p.Notes };
+  });
+  const hist = invoices.concat(payments, creditMemos).filter(function(x) { return x.IsHistoricalNonposting; }).length;
+
+  const raw = [];
+  const pushRaw = function(type, list) { list.forEach(function(x) { raw.push([customerId, type, idOf(x), hub_safeExternalText_(JSON.stringify(x), 45000)]); }); };
+  pushRaw('customer', [customer]); pushRaw('invoice', invoices); pushRaw('payment', payments);
+  pushRaw('credit-memo', creditMemos); pushRaw('sales-order', salesOrders);
+
+  return {
+    summaryRow: [
+      new Date(), customerId, customer.Name || '', customer.Number || '',
+      invoices.length, payments.length, creditMemos.length, salesOrders.length,
+      openInvoices, unapplied, openCredits, money(openInvoices - unapplied - openCredits),
+      mismatches.length, deposits.length,
+      invoices.filter(function(i) { return i.Order && idOf(i.Order); }).length,
+      salesOrders.filter(function(s) { return s.IsChangeOrder; }).length, hist,
+      uniq(invoices.map(status)), uniq(payments.map(status)), uniq(creditMemos.map(status)), uniq(salesOrders.map(status)),
+      hub_safeExternalText_(JSON.stringify(deposits), 45000), httpErrors
+    ],
+    mismatches: mismatches,
+    raw: raw
+  };
+}
+/* === HUB_STATEMENT_PROBE_R1_END === */
