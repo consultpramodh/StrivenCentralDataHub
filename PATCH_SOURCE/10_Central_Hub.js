@@ -3277,7 +3277,7 @@ function hub_stmtProbeCustomer_(token, customerId) {
   const parse = function(resp, label) {
     const code = resp.getResponseCode();
     if (code < 200 || code >= 300) { httpErrors++; hub_log_('WARN', 'STATEMENT_PROBE', label, 'HTTP ' + code, hub_safeExternalText_(resp.getContentText(), 500)); return null; }
-    try { return JSON.parse(resp.getContentText()); } catch (e) { httpErrors++; return null; }
+    try { return hub_stmtPascalKeys_(JSON.parse(resp.getContentText())); } catch (e) { httpErrors++; return null; }
   };
   const idOf = function(x) { return x ? (x.Id !== undefined ? x.Id : x.id) : undefined; };
   const money = function(n) { return Math.round((Number(n) || 0) * 100) / 100; };
@@ -3368,5 +3368,14 @@ function hub_stmtProbeCustomer_(token, customerId) {
     mismatches: mismatches,
     raw: raw
   };
+}
+// Live Striven JSON is camelCase (verified in PO_DATA_CONTRACT_PROBE); swagger documents PascalCase.
+// Normalize to PascalCase so field access is stable either way.
+function hub_stmtPascalKeys_(v) {
+  if (Array.isArray(v)) return v.map(hub_stmtPascalKeys_);
+  if (!v || typeof v !== 'object') return v;
+  const out = {};
+  Object.keys(v).forEach(function(k) { out[k.charAt(0).toUpperCase() + k.slice(1)] = hub_stmtPascalKeys_(v[k]); });
+  return out;
 }
 /* === HUB_STATEMENT_PROBE_R1_END === */

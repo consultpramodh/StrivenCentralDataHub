@@ -166,6 +166,29 @@ The probe is `hub_probeCustomerStatements()` in `PATCH_SOURCE/10_Central_Hub.js`
    - **`STMT_PROBE_MISMATCH`:** invoices where *total − applied payments and credits* does not equal Striven's `OpenBalance`. Each one points to a refund, journal entry or other adjustment we need to handle (gap 3).
    - **`STMT_PROBE_RAW`:** the full JSON of every record, for checking field names.
 
+## 5b. Findings from the live Hub sheet (2026-11-19)
+
+**An A/R module already exists to reuse.** Branch `feature/open-balance-rep-reports` (`OpenBalanceDistribution.gs`, `OPEN_BALANCE_WEEKLY/WeeklyOpenBalanceTuesday10.gs`) already does the following:
+
+- Pulls a Striven **open-balance custom report** (Script Property `STRIVEN_OPEN_BALANCE_REPORT_URL`, `/v2/reports/...`) into `DATA_OPEN_BALANCES`. The 2026-10-06 refresh brought in 274 rows: 86 invoices and 188 payments.
+- Ages invoices with `obBuildInvoiceAging_()` (Current / 1–30 / 31–60 / 61–90 / 90+). This is the same bucket logic statements need.
+- Builds branded HTML for Gmail in `obBuildEmailHtml_()`, with a size guard and splitting so Gmail doesn't clip it.
+- Uses `obStrivenApiRequest_()` / `obGetStrivenAccessToken_()` with retry and token refresh, and parses search pages with `obExtractInvoiceSearchPage_()`.
+
+Statements should share these helpers rather than copy them. The open-balance report also gives a fast way to list every customer with a balance, which is useful for picking which customers to generate statements for.
+
+**How deposits appear (gap 4, partly answered).** In `DATA_OPEN_BALANCES`, deposits are **payments with a negative open balance**, and the memo holds the sales-order number:
+
+- `Deposit 581961`
+- `Deposit custom Ortal Chatsworth`
+- `584983` (memo is just the number)
+
+Part-applied payments use the memo `Payment for: Invoice 595451`. So the job link for deposits can be parsed from the memo: a 6-digit number that matches a sales order for the same customer. When it can't be matched, the deposit falls back to "Deposit – job not identified" on the statement.
+
+**JSON casing.** Live Striven responses are **camelCase** (`openBalance`, `appliedToInvoices`, `txnDate`), even though the swagger file shows PascalCase. The probe normalizes keys with `hub_stmtPascalKeys_()`.
+
+**Sales rep is available.** Invoice detail includes `salesRep`. It isn't in the swagger file, but it was verified in `PO_DATA_CONTRACT_PROBE`. Statements can show "Your sales rep: …" from it.
+
 ## 6. Verification plan
 
 - **Probe:** for each sample customer, the computed open total equals Σ `OpenBalance` (to the cent).
